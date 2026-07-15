@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <unistd.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -63,6 +64,26 @@ EMSCRIPTEN_KEEPALIVE void perform_thread_dump() {
 	mono_threads_request_thread_dump();
 }
 
+/* === native (dlmalloc) heap introspection (callable from JS via Module._ikvm_native_*) ===
+ * Reads dlmalloc's own accounting instead of mono's GC. The previous mono_gc_* probes deadlocked
+ * when called from the UI thread while mono held its GC lock on a worker; mallinfo() only takes the
+ * (brief) malloc lock, so it's safe from any thread and stays live even when mono has wedged or
+ * asserted near OOM. Managed-heap size still comes from the GC.GetTotalMemory Task path.
+ *
+ * used (uordblks) = bytes currently handed out to callers = live native allocations; a monotonic
+ * climb here (while the managed heap is flat) is a native leak. free (fordblks) = free bytes sitting
+ * inside the arena; a large/growing value while `used` is flat is fragmentation — the arena high-water
+ * only ever grows because wasm linear memory can't shrink. Read alongside wasmMemory.buffer.byteLength
+ * (total) + the managed GC sample, this splits native-leak vs fragmentation vs managed growth.
+ *
+ * NOTE: struct mallinfo fields are 32-bit int here (dlmalloc is built with MALLINFO_FIELD_TYPE=int,
+ * and <malloc.h> matches), so a byte count above 2GB reads back signed-negative. The true value always
+ * fits in 32 bits (< the ~4GB wasm max), so reinterpret the field as unsigned to recover it. If MALLOC
+ * is ever switched away from dlmalloc (e.g. mimalloc) mallinfo() no longer populates these — use that
+ * allocator's own stats API instead. */
+EMSCRIPTEN_KEEPALIVE double ikvm_native_used_mb (void) { return (double) (uint32_t) mallinfo ().uordblks / (1024.0 * 1024.0); }
+EMSCRIPTEN_KEEPALIVE double ikvm_native_free_mb (void) { return (double) (uint32_t) mallinfo ().fordblks / (1024.0 * 1024.0); }
+
 void classloader_debug(char* log) {
 	EM_ASM({ console.debug(UTF8ToString($0)); }, log);
 }
@@ -70,6 +91,13 @@ void mono_interp_pgo_add_method (void *method);
 void ikvm_pgo_add_method (void *method) {
 	mono_interp_pgo_add_method(method);
 }
+
+/* runtime wasm-JIT bring-up stats (defined in mono mini-wasm.c). Read from managed code so the
+ * probe can report them via Console.WriteLine (the only log channel that reaches the UI page). */
+extern int mono_wasm_jit_registered_count;
+extern int mono_wasm_jit_invoke_count;
+int wasm_jit_registered_count (void) { return mono_wasm_jit_registered_count; }
+int wasm_jit_invoke_count (void) { return mono_wasm_jit_invoke_count; }
 
 struct _MonoImage {
 	int   ref_count;

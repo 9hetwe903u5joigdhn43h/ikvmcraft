@@ -9,30 +9,21 @@ public static class IkvmKnotBridge
 		return IkvmClassLoader.LatestInstance.TransformClassBytecode(name, array);
 	}
 
-	// Called from the patched tryLoadClass with the class Knot just defined, before it is returned
-	// (and thus before any of its methods run). Lets us seed the interp PGO table for hot classes
-	// at exactly the right moment, with the real (post-mixin) Class in hand.
 	public static void OnClassDefined(java.lang.Class klass)
 	{
 		IkvmClassLoader.PgoOnClassDefined(klass);
 	}
 }
 
-internal class InjectIkvmIntoKnotTransform : ClassNode
+internal class InjectIkvmIntoKnotTransform(string name, ClassWriter writer) : ClassNode(Opcodes.ASM9)
 {
 	public static IkvmClassLoaderTransformer Transformer = () => {
 		return (["net.fabricmc.loader.impl.launch.knot.KnotClassDelegate"], typeof(InjectIkvmIntoKnotTransform));
 	};
-	ClassWriter Writer;
-
-	public InjectIkvmIntoKnotTransform(string name, ClassWriter writer) : base(Opcodes.ASM9)
-	{
-		Writer = writer;
-	}
 
 	public override void visitEnd()
 	{
-		var tryLoadClass = this.methods.toArray().Cast<MethodNode>()
+		var tryLoadClass = methods.toArray().Cast<MethodNode>()
 			.First(x => x.name == "tryLoadClass" && x.desc == "(Ljava/lang/String;Z)Ljava/lang/Class;");
 
 		var c = new JavaCursor(tryLoadClass);
@@ -64,6 +55,6 @@ internal class InjectIkvmIntoKnotTransform : ClassNode
 		c.Emit(Opcodes.DUP);
 		c.EmitMethod(Opcodes.INVOKESTATIC, "cli/IkvmKnotBridge", "OnClassDefined", "(Ljava/lang/Class;)V");
 
-		accept(Writer);
+		accept(writer);
 	}
 }

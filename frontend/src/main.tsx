@@ -1,6 +1,6 @@
 import { css, FC } from "dreamland/core";
 import "./style.css";
-import { loglisteners, initDotnet, play, crashMinecraftF3C, dumpJiterpHeat, benchMeasure } from "./dotnet";
+import { loglisteners, initDotnet, play, crashMinecraftF3C, dumpJiterpHeat, dumpWasmJit, benchMeasure, dotnetState, mallocSampler, mallocSamplerReset, dumpMallocSites } from "./dotnet";
 import { downloadFabricMinecraftVersionToOpfs, isMinecraftVersionDownloaded } from "./minecraft";
 import { OpfsExplorer } from "./fs";
 
@@ -49,10 +49,11 @@ LogView.css = `
 	}
 `;
 
-function App(this: FC<{}, { canvas: HTMLCanvasElement; fsOpen: boolean; benchRunning: boolean; walkDuringBench: boolean }>) {
+function App(this: FC<{}, { canvas: HTMLCanvasElement; fsOpen: boolean; benchRunning: boolean; walkDuringBench: boolean; sampling: boolean }>) {
 	this.fsOpen = false;
 	this.benchRunning = false;
 	this.walkDuringBench = false;
+	this.sampling = false;
 
 	this.cx.mount = async () => {
 		if (!(await isMinecraftVersionDownloaded("1.16.1-fabric-0.19.2", { verifyHashes: true })))
@@ -69,8 +70,9 @@ function App(this: FC<{}, { canvas: HTMLCanvasElement; fsOpen: boolean; benchRun
 		<div>
 			<canvas id="canvas" class="canvas" this={use(this.canvas)} on:contextmenu={(e: Event) => e.preventDefault()} />
 			<div class="debug">
-				<button on:click={crashMinecraftF3C}>F3+C</button>
-				<button on:click={() => dumpJiterpHeat(60)}>Jiterp Heat</button>
+				<b>fps: {use(dotnetState.fps)} ({use(dotnetState.fpsAvg).map(x=>x.toFixed(2))})</b>
+				<button on:click={() => (globalThis as any).wasm.Module.ccall("perform_thread_dump")}>Thread dump</button>
+				<button on:click={() => dumpWasmJit()}>Wasm JIT</button>
 				<label style="display: flex; align-items: center; gap: 0.25rem;">
 					<input type="checkbox" on:change={(e: any) => (this.walkDuringBench = e.target.checked)} />
 					walk
@@ -84,6 +86,7 @@ function App(this: FC<{}, { canvas: HTMLCanvasElement; fsOpen: boolean; benchRun
 					}}
 				>Bench 60s</button>
 				<button on:click={() => (this.fsOpen = !this.fsOpen)}>Files</button>
+				<span>memory: gc {use(dotnetState.gcMemory).map(x=> x.toFixed(0))} · native {use(dotnetState.nativeUsed).map(x=> x.toFixed(0))}+{use(dotnetState.nativeFree).map(x=> x.toFixed(0))}free · wasm {use(dotnetState.memory).map(x=> (x / (1024 * 1024)).toFixed(0))} · ua {use(dotnetState.uaMemory).map(x=> (x / (1024 * 1024)).toFixed(0))} (mb)</span>
 			</div>
 			<LogView scrolling={true} />
 			<OpfsExplorer open={use(this.fsOpen)} />

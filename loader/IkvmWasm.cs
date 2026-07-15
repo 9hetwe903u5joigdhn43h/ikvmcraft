@@ -31,7 +31,7 @@ static partial class IkvmWasm
         for (int i = 0; i < outerLength; i++)
         {
             using var innerArray = jsObject.GetPropertyAsJSObject(i.ToString());
-            var innerLength = innerArray!.GetPropertyAsInt32("length");
+            var innerLength = innerArray.GetPropertyAsInt32("length");
             result[i] = new string[innerLength];
 
             for (int j = 0; j < innerLength; j++)
@@ -59,13 +59,14 @@ static partial class IkvmWasm
 			File.CreateSymbolicLink($"/dlls/{dll.MappedName}", $"/fetchdlls/{dll.RealName}");
         }
     }
-
     [JSExport]
     internal static Task PreInit(string fetchbase, string[] rawDlls, JSObject props)
     {
         try
         {
             Emscripten.InstallThreadLogForwarder();
+            //WasmJitProbe.WasmJitProbeRun(); // after the forwarder so the emitter's g_printerr (worker stderr) reaches the page
+            //WasmJitProbe.WasmJitEhTest(); // deterministic EH-propagation + OP_THROW repro (re-enable + AOT=false to run)
 
             Emscripten.MountOpfs();
 
@@ -164,8 +165,6 @@ static partial class IkvmWasm
 					RemoveDfuPreloadTransform.Transformer,
 					NoopAssertThreadTransform.Transformer,
 					NoopCheckAllocatedTransform.Transformer,
-
-					SealLeavesTransform.Transformer,
 				],
 				PgoProfile = profile,
             });
@@ -185,13 +184,13 @@ static partial class IkvmWasm
         try
         {
             Console.WriteLine($"[IKVM] running jar {jarPath}");
-            var mainClassName = mainclass == null ? GetMainClassName(jarPath) : mainclass;
+            var mainClassName = mainclass ?? GetMainClassName(jarPath);
             Console.WriteLine($"[IKVM] main class: {mainClassName}");
 
             var mainClass = java.lang.Class.forName(mainClassName, true, java.lang.Thread.currentThread().getContextClassLoader());
             var stringArrayClass = java.lang.Class.forName("[Ljava.lang.String;");
-            var mainMethod = mainClass.getMethod("main", new[] { stringArrayClass });
-            mainMethod.invoke(null, new object[] { Array.Empty<string>() });
+            var mainMethod = mainClass.getMethod("main", [stringArrayClass]);
+            mainMethod.invoke(null, [Array.Empty<string>()]);
             return Task.CompletedTask;
         }
         catch (Exception e)
@@ -204,11 +203,7 @@ static partial class IkvmWasm
     private static string GetMainClassName(string jarPath)
     {
         var jar = new java.util.jar.JarFile(jarPath);
-        var manifest = jar.getManifest();
-        if (manifest == null)
-        {
-            throw new InvalidDataException($"Jar has no manifest: {jarPath}");
-        }
+        var manifest = jar.getManifest() ?? throw new InvalidDataException($"Jar has no manifest: {jarPath}");
 
         var mainClass = manifest.getMainAttributes()?.getValue(java.util.jar.Attributes.Name.MAIN_CLASS);
         if (string.IsNullOrWhiteSpace(mainClass))
@@ -217,5 +212,20 @@ static partial class IkvmWasm
         }
 
         return mainClass.Trim();
+    }
+
+    [JSExport]
+    internal static Task WatchMemoryUsage(int delay, [JSMarshalAs<JSType.Function<JSType.Number, JSType.Boolean>>] Func<double, bool> callback)
+    {
+        return Task.Run(async () =>
+        {
+            while (true)
+            {
+				var info = GC.GetGCMemoryInfo();
+                bool stop = callback((double)info.TotalCommittedBytes / (1024 * 1024));
+				if (stop) break;
+                await Task.Delay(delay);
+            }
+        });
     }
 }

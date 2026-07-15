@@ -61,8 +61,8 @@ BUNDLES: list[Bundle] = [
     Bundle(
         name="lwjgl3",
         output_dir="statics",
-        output_dll="ikvmc_lwjgl3-3.2.2.dll",
-        jars=["file:statics/lwjgl3-3.2.2.jar"],
+        output_dll="ikvmc_lwjgl3.dll",
+        jars=["file:statics/lwjgl3.jar"],
         prefixes=["org.lwjgl."],
         aot=True,
         always_replace=True,
@@ -89,6 +89,16 @@ BUNDLES: list[Bundle] = [
         aot=True,
     ),
     Bundle(
+        name="gson",
+        output_dir="jars",
+        output_dll="ikvmc_gson-2.8.0.dll",
+        jars=[
+            "com.google.code.gson:gson:2.8.0",
+        ],
+        prefixes=["com.google.gson."],
+        aot=True,
+    ),
+    Bundle(
         name="fastutil",
         output_dir="jars",
         output_dll="ikvmc_fastutil-8.2.1.dll",
@@ -106,7 +116,7 @@ BUNDLES: list[Bundle] = [
             "io.netty:netty-all:4.1.25.Final",
         ],
         prefixes=["io.netty."],
-        aot=False,
+        aot=True,
         # Mojang's patchy ships only io.netty.bootstrap.Bootstrap; with netty-all AOT'd it would be the
         # lone io.netty class still loaded JIT, splitting the io.netty.bootstrap package across loaders.
         hide_jars=["com.mojang:patchy:1.3.9"],

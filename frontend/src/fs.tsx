@@ -1,17 +1,45 @@
 import { css, FC } from "dreamland/core";
 
+import tar, { Headers as TarHeaders, Pack } from "tar-stream";
+import {
+	fromWeb as streamFromWeb,
+	toWeb as streamToWeb,
+	/* @ts-expect-error streamx-webstream ships no type declarations */
+} from "streamx-webstream";
+
 // The File System Access API pickers are non-standard and missing from lib.dom.
 declare global {
 	function showOpenFilePicker(options?: { multiple?: boolean }): Promise<FileSystemFileHandle[]>;
 	function showDirectoryPicker(): Promise<FileSystemDirectoryHandle>;
+	function showSaveFilePicker(options?: {
+		excludeAcceptAllOption?: boolean;
+		suggestedName?: string;
+		types?: FilePickerAcceptType[];
+	}): Promise<FileSystemFileHandle>;
+	type FilePickerAcceptType = {
+		description?: string;
+		accept: Record<string, string | string[]>;
+	};
 	interface Window {
 		showOpenFilePicker?: unknown;
 		showDirectoryPicker?: unknown;
+		showSaveFilePicker?: unknown;
 	}
 }
 
 export const PICKERS_UNAVAILABLE =
 	!window.showDirectoryPicker || !window.showOpenFilePicker;
+
+export const TAR_TYPES: FilePickerAcceptType[] = [
+	{
+		description: "TAR archive (.tar)",
+		accept: { "application/x-tar": ".tar" },
+	},
+	{
+		description: "GZip compressed TAR archive (.tar.gz)",
+		accept: { "application/x-gzip": ".tar.gz", "application/gzip": ".tar.gz" },
+	},
+];
 
 const rootFolder = await navigator.storage.getDirectory();
 
@@ -46,6 +74,140 @@ async function copyFolder(folder: FileSystemDirectoryHandle, to: FileSystemDirec
 	await upload(folder, newFolder);
 }
 
+async function createEntry(
+	pack: Pack,
+	header: TarHeaders,
+	file?: ReadableStream<Uint8Array>
+) {
+	let resolve: () => void = null!;
+	let reject: (err: any) => void = null!;
+	const promise = new Promise<void>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+
+	const entry = pack.entry(header, (err) => {
+		if (err) reject(err);
+		else resolve();
+	});
+
+	if (file) {
+		const reader = file.getReader();
+		while (true) {
+			const { value, done } = await reader.read();
+			if (done || !value) break;
+
+			entry.write(value);
+		}
+
+		entry.end();
+	} else {
+		entry.end();
+	}
+
+	await promise;
+}
+
+export function createTar(
+	folder: FileSystemDirectoryHandle,
+	callback?: (type: "directory" | "file", name: string) => void
+): ReadableStream {
+	const archive = tar.pack();
+
+	async function pack(pathPrefix: string, folder: FileSystemDirectoryHandle) {
+		// FileSystemDirectoryHandle async iteration lives in lib.dom.asynciterable, not enabled here.
+		for await (const [name, entry] of folder as any) {
+			if (callback) callback(entry.kind, name);
+
+			if (entry.kind == "file") {
+				const file = await (entry as FileSystemFileHandle).getFile();
+				const stream = file.stream();
+
+				await createEntry(
+					archive,
+					{
+						name: pathPrefix + name,
+						type: entry.kind,
+						size: file.size,
+					},
+					stream
+				);
+			} else {
+				await createEntry(archive, {
+					name: pathPrefix + name,
+					type: entry.kind,
+				});
+
+				await pack(pathPrefix + name + "/", entry as FileSystemDirectoryHandle);
+			}
+		}
+	}
+	pack("", folder).then(() => archive.finalize());
+
+	return streamToWeb(archive);
+}
+
+export async function extractTar(
+	stream: ReadableStream<Uint8Array>,
+	folder: FileSystemDirectoryHandle,
+	callback?: (type: "directory" | "file", name: string) => void
+) {
+	const tarInput = streamFromWeb(stream);
+	const archive = tar.extract();
+
+	archive.on("entry", async (header, stream, next) => {
+		const body: ReadableStream<Uint8Array> = streamToWeb(stream);
+
+		async function consume() {
+			const reader = body.getReader();
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done || !value) break;
+			}
+		}
+
+		const path = header.name.split("/");
+		if (path[path.length - 1] === "") path.pop();
+		if (path[0] === folder.name) path.shift();
+		if (path.length === 0) {
+			await consume();
+			next();
+			return;
+		}
+
+		let handle = folder;
+		for (const name of path.splice(0, path.length - 1)) {
+			handle = await handle.getDirectoryHandle(name, { create: true });
+		}
+
+		if (header.type === "directory") {
+			await handle.getDirectoryHandle(path[0], { create: true });
+			await consume();
+
+			if (callback) callback("directory", path[0]);
+		} else if (header.type === "file") {
+			const file = await handle.getFileHandle(path[0], { create: true });
+			const writable = await file.createWritable();
+			await body.pipeTo(writable);
+
+			if (callback) callback("file", path[0]);
+		} else {
+			await consume();
+		}
+
+		next();
+	});
+
+	const promise = new Promise<void>((res, rej) => {
+		archive.on("finish", () => res());
+		archive.on("error", (err) => rej(err));
+	});
+
+	tarInput.pipe(archive);
+	await promise;
+}
+
 type Entry = { name: string; entry: FileSystemHandle };
 
 export function OpfsExplorer(
@@ -57,6 +219,7 @@ export function OpfsExplorer(
 			entries: Entry[];
 			editing: FileSystemFileHandle | null;
 			uploading: boolean;
+			downloading: boolean;
 		}
 	>
 ) {
@@ -65,6 +228,7 @@ export function OpfsExplorer(
 	this.entries = [];
 	this.editing = null as FileSystemFileHandle | null;
 	this.uploading = false;
+	this.downloading = false;
 
 	const refresh = async () => {
 		this.components = (await rootFolder.resolve(this.path)) || [];
@@ -110,7 +274,39 @@ export function OpfsExplorer(
 		this.uploading = false;
 	};
 
+	const downloadArchive = async () => {
+		const dirName = this.components.at(-1) || "ikvmcraft";
+		const file = await showSaveFilePicker({
+			excludeAcceptAllOption: true,
+			suggestedName: dirName + ".tar",
+			types: TAR_TYPES,
+		});
+
+		this.downloading = true;
+
+		let stream = createTar(this.path, (type, name) => console.log(`tarring ${type} ${name}`));
+		if (file.name.endsWith(".gz")) stream = stream.pipeThrough(new CompressionStream("gzip"));
+
+		const fileStream = await file.createWritable();
+		await stream.pipeTo(fileStream);
+
+		this.downloading = false;
+	};
+
+	const uploadArchive = async () => {
+		const files = await showOpenFilePicker({ multiple: true });
+		this.uploading = true;
+		for (const file of files) {
+			let stream = await file.getFile().then((r) => r.stream());
+			if (file.name.endsWith(".gz")) stream = stream.pipeThrough(new DecompressionStream("gzip"));
+			await extractTar(stream, this.path, (type, name) => console.log(`untarring ${type} ${name}`));
+		}
+		this.path = this.path;
+		this.uploading = false;
+	};
+
 	const uploadDisabled = use(this.uploading).map((x) => x || PICKERS_UNAVAILABLE);
+	const downloadDisabled = use(this.downloading).map((x) => x || PICKERS_UNAVAILABLE);
 
 	return (
 		<div class="fs-explorer" class:open={use(this.open)}>
@@ -132,10 +328,17 @@ export function OpfsExplorer(
 				<button disabled={uploadDisabled} on:click={uploadFolder}>
 					Upload Folder
 				</button>
+				<button disabled={uploadDisabled} on:click={uploadArchive} title="Extract a .tar/.tar.gz here">
+					Upload Archive
+				</button>
+				<button disabled={downloadDisabled} on:click={downloadArchive} title="Download this folder as a .tar/.tar.gz">
+					Download Archive
+				</button>
 				<button on:click={() => (this.open = false)}>Close</button>
 			</div>
 
 			{use(this.uploading).map((u) => (u ? <div class="status">Uploading files...</div> : null))}
+			{use(this.downloading).map((d) => (d ? <div class="status">Downloading archive...</div> : null))}
 
 			<div class="entries">
 				{use(this.entries).map((entries) =>

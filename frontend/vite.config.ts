@@ -6,6 +6,12 @@ export default defineConfig({
 	build: {
 		target: "es2022",
 	},
+	resolve: {
+		alias: {
+			// tar-stream pulls in node's "fs" (e.g. fs.constants); stub it for the browser.
+			fs: "rollup-plugin-node-polyfills/polyfills/empty",
+		},
+	},
 	server: {
 		headers: {
 			"Cross-Origin-Opener-Policy": "same-origin",

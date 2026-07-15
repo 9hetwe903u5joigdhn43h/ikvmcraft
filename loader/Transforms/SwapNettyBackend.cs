@@ -2,7 +2,7 @@ using System.Linq;
 using org.objectweb.asm;
 using org.objectweb.asm.commons;
 
-internal class SwapNettyBackendTransform : ClassRemapper
+internal class SwapNettyBackendTransform(string name, ClassWriter writer) : ClassRemapper(writer, RemapperForClass(name))
 {
 	private const string McConnection = "net.minecraft.network.Connection";
 	private const string McServerStatusPinger = "net.minecraft.client.multiplayer.ServerStatusPinger";
@@ -20,7 +20,7 @@ internal class SwapNettyBackendTransform : ClassRemapper
 
 	private static SimpleRemapper RemapperForClass(string name)
 	{
-		java.util.HashMap map = new();
+		java.util.HashMap map = [];
 
 		if (name == Mappings.CurrentMappings.GetClass(McServerConnectionListener).Name)
 		{
@@ -33,10 +33,6 @@ internal class SwapNettyBackendTransform : ClassRemapper
 			map.put(NioSocketChannel, IkvmWebSocketChannel);
 		}
 
-		return new(map);
-	}
-
-	public SwapNettyBackendTransform(string name, ClassWriter writer) : base(writer, RemapperForClass(name))
-	{
+		return new(Opcodes.ASM9, map);
 	}
 }

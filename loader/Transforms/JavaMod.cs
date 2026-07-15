@@ -17,7 +17,7 @@ internal enum JavaMoveType
 // as unset, so same-value constraints only bind within one attempt.
 internal static class JavaMatchScope
 {
-	[System.ThreadStatic]
+	[ThreadStatic]
 	private static int generation;
 
 	public static int Generation => generation;

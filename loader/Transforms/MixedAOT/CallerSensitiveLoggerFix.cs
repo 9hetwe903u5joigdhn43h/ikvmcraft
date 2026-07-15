@@ -10,6 +10,9 @@ internal static class CallerSensitiveLoggerFix
 
 	public static byte[] Apply(byte[] bytes)
 	{
+		if (bytes is null)
+			return bytes;
+
 		// Cheap reject: only pay for an ASM round-trip when the class actually references LogManager
 		// (its internal name lands in the constant pool verbatim as ASCII UTF-8).
 		if (!ContainsAscii(bytes, LogManager))
@@ -24,11 +27,9 @@ internal static class CallerSensitiveLoggerFix
 		return writer.toByteArray();
 	}
 
-	private sealed class Visitor : ClassVisitor
+	private sealed class Visitor(ClassVisitor next) : ClassVisitor(Opcodes.ASM9, next)
 	{
 		private string Owner;
-
-		public Visitor(ClassVisitor next) : base(Opcodes.ASM9, next) { }
 
 		public override void visit(int version, int access, string name, string signature, string superName, string[] interfaces)
 		{
@@ -43,12 +44,8 @@ internal static class CallerSensitiveLoggerFix
 		}
 	}
 
-	private sealed class MethodPatcher : MethodVisitor
+	private sealed class MethodPatcher(MethodVisitor next, string Owner) : MethodVisitor(Opcodes.ASM9, next)
 	{
-		private readonly string Owner;
-
-		public MethodPatcher(MethodVisitor next, string owner) : base(Opcodes.ASM9, next) => Owner = owner;
-
 		public override void visitMethodInsn(int opcode, string owner, string name, string descriptor, bool isInterface)
 		{
 			if (opcode == Opcodes.INVOKESTATIC
@@ -57,7 +54,7 @@ internal static class CallerSensitiveLoggerFix
 				&& (name == "getLogger" || name == "getFormatterLogger"))
 			{
 				// getLogger() -> getLogger(ThisClass.class)
-				base.visitLdcInsn(Type.getObjectType(Owner));
+				visitLdcInsn(Type.getObjectType(Owner));
 				base.visitMethodInsn(Opcodes.INVOKESTATIC, LogManager, name, ClassArgDesc, false);
 				return;
 			}

@@ -6,16 +6,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.JavaScript;
 using IKVM.Runtime;
 
-// ClassWriter.COMPUTE_FRAMES re-derives stack-map frames, which calls getCommonSuperClass to merge
-// reference types at control-flow joins. The default implementation loads both classes via the
-// classloader to find their common ancestor — but during incremental class loading a referenced MC
-// type is often not defined yet, so the load throws and the whole transform aborts the class load
-// (e.g. SealLeaves on WorldBorder/class_2784). Falling back to java/lang/Object on any resolution
-// failure keeps frame computation alive (Object is a valid, if wider, merge result), so a transform
-// never kills a class load over a not-yet-loadable type.
 internal class SafeClassWriter : org.objectweb.asm.ClassWriter
 {
 	public SafeClassWriter(org.objectweb.asm.ClassReader reader, int flags) : base(reader, flags) { }
@@ -242,16 +234,7 @@ internal sealed class IkvmClassLoader : java.net.URLClassLoader
 			}
 		}
 
-		// Always-on: make log4j's no-arg getLogger() AOT-safe (see CallerSensitiveLoggerFix). Guarded
-		// so a rewrite hiccup on some odd class can't break class loading.
-		try
-		{
-			bytes = CallerSensitiveLoggerFix.Apply(bytes);
-		}
-		catch (Exception e)
-		{
-			classloader_debug($"[IkvmClassLoader] CallerSensitiveLoggerFix skipped '{name}': {e.Message}");
-		}
+		bytes = CallerSensitiveLoggerFix.Apply(bytes);
 
 		return bytes;
 	}

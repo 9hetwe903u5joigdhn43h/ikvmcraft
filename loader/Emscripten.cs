@@ -1,5 +1,4 @@
 using System;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
 using System.Reflection;
@@ -98,8 +97,6 @@ public static class Emscripten
     private extern static int mount_fetch_file(int id, string path);
     [DllImport("Emscripten")]
     private extern static int mount_fetch_dir(int id, string path);
-
-	private static string[] FetchIDs = new string[8];
 
     public static void MountFetch(int id, string src, string dst)
     {

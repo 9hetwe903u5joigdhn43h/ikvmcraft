@@ -9,7 +9,7 @@ using sun.net.spi.nameservice;
 
 static class IkvmNetworkState
 {
-	static List<string> FakeDnsResolves = new();
+	static readonly List<string> FakeDnsResolves = [];
 
 	private static (byte, byte, byte, byte) GetIPFromIndex(int index)
 	{
@@ -47,10 +47,10 @@ public class IkvmNameService : NameService
 {
 	public static void Install()
 	{
-		var _touch = InetAddress.getByAddress([240, 0, 0, 0]);
+		_ = InetAddress.getByAddress([240, 0, 0, 0]);
 
 		var field = typeof(InetAddress).GetField("nameServices", BindingFlags.Static | BindingFlags.NonPublic);
-		field.SetValue(null, java.util.Arrays.asList((NameService)new IkvmNameService()));
+		field.SetValue(null, java.util.Arrays.asList(new IkvmNameService()));
 	}
 
 	public InetAddress[] lookupAllHostAddr(string host)
@@ -184,8 +184,8 @@ public sealed class IkvmWebSocketChannel : io.netty.channel.AbstractChannel
 	private readonly java.lang.Runnable ReadTask;
 	private readonly Queue<io.netty.buffer.ByteBuf> InboundBuffer = new();
 
-	internal java.net.SocketAddress Remote;
-	internal java.net.SocketAddress Local;
+	internal SocketAddress Remote;
+	internal SocketAddress Local;
 	private IkvmWispConnection Conn;
 	private volatile bool Open = true;
 	private volatile bool Active;
@@ -203,15 +203,15 @@ public sealed class IkvmWebSocketChannel : io.netty.channel.AbstractChannel
 	public override bool isOpen() => Open;
 	public override bool isActive() => Active;
 
-	protected override io.netty.channel.AbstractChannel.AbstractUnsafe newUnsafe() => new IkvmWispUnsafe(this);
+	protected override AbstractUnsafe newUnsafe() => new IkvmWispUnsafe(this);
 
 	// Accept any event loop (Default/Nio/Oio); we drive everything off WebSocket callbacks.
 	protected override bool isCompatible(io.netty.channel.EventLoop loop) => true;
 
-	protected override java.net.SocketAddress localAddress0() => Local;
-	protected override java.net.SocketAddress remoteAddress0() => Remote;
+	protected override SocketAddress localAddress0() => Local;
+	protected override SocketAddress remoteAddress0() => Remote;
 
-	protected override void doBind(java.net.SocketAddress local) => Local = local;
+	protected override void doBind(SocketAddress local) => Local = local;
 
 	protected override void doDisconnect() => doClose();
 
@@ -370,9 +370,9 @@ public sealed class IkvmWebSocketChannel : io.netty.channel.AbstractChannel
 	// The remote carries one of IkvmNameService's synthetic 240.67.x.y addresses; map it back
 	// to the original hostname so the proxy dials the real server. Falls back to the address's
 	// own hostname (e.g. a literal IP that never went through our resolver).
-	internal static (string, int) ResolveTarget(java.net.SocketAddress remote)
+	internal static (string, int) ResolveTarget(SocketAddress remote)
 	{
-		var isa = (java.net.InetSocketAddress)remote;
+		var isa = (InetSocketAddress)remote;
 		int port = isa.getPort();
 		var addr = isa.getAddress();
 		if (addr != null)
@@ -395,7 +395,7 @@ internal sealed class IkvmWispUnsafe : io.netty.channel.AbstractChannel.Abstract
 
 	internal IkvmWispUnsafe(IkvmWebSocketChannel chan) : base(chan) => Chan = chan;
 
-	public override void connect(java.net.SocketAddress remoteAddress, java.net.SocketAddress localAddress, io.netty.channel.ChannelPromise promise)
+	public override void connect(SocketAddress remoteAddress, SocketAddress localAddress, io.netty.channel.ChannelPromise promise)
 	{
 		if (!promise.setUncancellable() || !ensureOpen(promise))
 			return;

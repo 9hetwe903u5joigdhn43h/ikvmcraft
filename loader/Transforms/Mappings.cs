@@ -16,9 +16,10 @@ internal interface IMappings
 	public IClassMapping GetClass(string klass);
 }
 
-class MojmapClassMapping : IClassMapping
+partial class MojmapClassMapping : IClassMapping
 {
-	private static Regex Pattern = new(@"^\s*\d*:\d*:(?<Unmapped>.*) -> (?<Mapped>.*)$", RegexOptions.Compiled);
+	[GeneratedRegex(@"^\s*\d*:\d*:(?<Unmapped>.*) -> (?<Mapped>.*)$")]
+	private static partial Regex Pattern { get; }
 
 	public string Unmapped;
 	public string Mapped;
@@ -56,7 +57,7 @@ class MojmapClassMapping : IClassMapping
 		var paramTypeStr = rest[(sigStart + 1)..sigEnd];
 		var name = rest[..sigStart];
 
-		var paramTypes = (paramTypeStr.Length == 0 ? [] : paramTypeStr.Split(",")).Select(x => MojmapTypeToJvm(x));
+		var paramTypes = (paramTypeStr.Length == 0 ? [] : paramTypeStr.Split(",")).Select(MojmapTypeToJvm);
 
 		return (name, "(" + string.Join("", paramTypes) + ")" + MojmapTypeToJvm(retType)); 
 	}
@@ -65,8 +66,8 @@ class MojmapClassMapping : IClassMapping
 	{
 		Unmapped = unmapped;
 		Mapped = mapped;
-		Fields = new();
-		Methods = new();
+		Fields = [];
+		Methods = [];
 
 		foreach (Capture c in contents.Captures)
 		{
@@ -106,15 +107,15 @@ class MojmapClassMapping : IClassMapping
 	}
 }
 
-internal class MojmapMappings : IMappings
+internal partial class MojmapMappings : IMappings
 {
-	private static Regex Pattern = new(@"(?<Unmapped>.*) -> (?<Mapped>.*):\n(?<Contents>    .*\n?)*", RegexOptions.Compiled);
+	[GeneratedRegex(@"(?<Unmapped>.*) -> (?<Mapped>.*):\n(?<Contents>    .*\n?)*")]
+	private static partial Regex Pattern { get; }
 
-	private Dictionary<string, MojmapClassMapping> Classes;
+	private readonly Dictionary<string, MojmapClassMapping> Classes = [];
 
 	public MojmapMappings(string contents)
 	{
-		Classes = new();
 		foreach (Match m in Pattern.Matches(contents))
 		{
 			var unmapped = m.Groups["Unmapped"].Value;
@@ -127,7 +128,7 @@ internal class MojmapMappings : IMappings
 	public IClassMapping GetClass(string klass)
 	{
 		Classes.TryGetValue(klass, out var Klass);
-		return (IClassMapping)Klass;
+		return Klass;
 	}
 }
 
@@ -155,7 +156,7 @@ internal class TinyV1ClassMapping : IClassMapping
 
 internal class TinyV1Mappings : IMappings
 {
-	private Dictionary<string, TinyV1ClassMapping> Classes;
+	private readonly Dictionary<string, TinyV1ClassMapping> Classes = [];
 
 	public static TinyV1Mappings FromResource(java.io.InputStream stream)
 	{
@@ -181,12 +182,10 @@ internal class TinyV1Mappings : IMappings
 
 	public TinyV1Mappings(string contents)
 	{
-		Classes = new();
-
 		string unmapped = "";
 		string mapped = "";
-		Dictionary<string, string> fields = new();
-		Dictionary<(string, string), string> methods = new();
+		Dictionary<string, string> fields = [];
+		Dictionary<(string, string), string> methods = [];
 		foreach (var line in contents.Split("\n").Skip(1))
 		{
 			var parts = line.Split("\t");
@@ -200,13 +199,9 @@ internal class TinyV1Mappings : IMappings
 							Fields = fields,
 							Methods = methods,
 						};
-						fields = new();
-						methods = new();
+						fields = [];
+						methods = [];
 					}
-					// store the official name dotted so it matches MojmapMappings' (dotted) obf names
-					// when chained. Obfuscated classes are single tokens (no separators) so this is a
-					// no-op for them; it only matters for identity-mapped, package-path classes like
-					// com.mojang.blaze3d.systems.RenderSystem, which otherwise miss the slash-keyed dict.
 					unmapped = parts[1].Replace("/", ".");
 					mapped = parts[2].Replace("/", ".");
 					break;
@@ -232,26 +227,15 @@ internal class TinyV1Mappings : IMappings
 	public IClassMapping GetClass(string klass)
 	{
 		Classes.TryGetValue(klass, out var Klass);
-		return (IClassMapping)Klass;
+		return Klass;
 	}
 }
 
-internal struct IntermediaryClassMappings : IClassMapping
+internal struct IntermediaryClassMappings(IMappings OneMappings, IClassMapping One, IClassMapping Two) : IClassMapping
 {
-	private IMappings OneMappings;
-	public IClassMapping One;
-	public IClassMapping Two;
+	public readonly string Name => Two.Name;
 
-	public IntermediaryClassMappings(IMappings oneMappings, IClassMapping one, IClassMapping two)
-	{
-		OneMappings = oneMappings;
-		One = one;
-		Two = two;
-	}
-
-	public string Name => Two.Name;
-
-	public string GetField(string field)
+	public readonly string GetField(string field)
 	{
 		var one = One.GetField(field);
 		if (one == null)
@@ -259,7 +243,7 @@ internal struct IntermediaryClassMappings : IClassMapping
 		return Two.GetField(one);
 	}
 
-	public string GetMethod(string method, string signature)
+	public readonly string GetMethod(string method, string signature)
 	{
 		var one = One.GetMethod(method, signature);
 		//Console.WriteLine($"[Intermediary] GetMethod One {method} {signature} {one}"); 
@@ -271,18 +255,9 @@ internal struct IntermediaryClassMappings : IClassMapping
 	}
 }
 
-internal struct IntermediaryMappings : IMappings
+internal struct IntermediaryMappings(IMappings One, IMappings Two) : IMappings
 {
-	public IMappings One;
-	public IMappings Two;
-
-	public IntermediaryMappings(IMappings one, IMappings two)
-	{
-		One = one;
-		Two = two;
-	}
-
-	public IClassMapping GetClass(string klass)
+	public readonly IClassMapping GetClass(string klass)
 	{
 		var official = One.GetClass(klass);
 		//Console.WriteLine($"[Intermediary] GetClass One {klass}"); 
@@ -299,7 +274,7 @@ internal struct IntermediaryMappings : IMappings
 	}
 }
 
-internal class Mappings
+internal partial class Mappings
 {
 	private static IMappings _CurrentMappings = null;
 	public static IMappings CurrentMappings {
@@ -311,7 +286,8 @@ internal class Mappings
 		}
 	}
 
-	private static Regex ClassPattern = new(@"L(?<Class>[^;]+);", RegexOptions.Compiled);
+	[GeneratedRegex(@"L(?<Class>[^;]+);")]
+	private static partial Regex ClassPattern { get; }
 
 	internal static string RemapClassSignature(IMappings mappings, string sig)
 	{

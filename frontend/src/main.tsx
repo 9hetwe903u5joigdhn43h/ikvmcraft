@@ -1,6 +1,8 @@
 import { css, FC } from "dreamland/core";
 import "./style.css";
-import { loglisteners, initDotnet, play, crashMinecraftF3C, dumpJiterpHeat, dumpWasmJit, benchMeasure, dotnetState, mallocSampler, mallocSamplerReset, dumpMallocSites } from "./dotnet";
+import { initDotnet, play, dotnetState } from "./dotnet";
+import { loglisteners } from "./dotnet/log";
+import { dumpWasmJit, benchMeasure } from "./dotnet/jitbench";
 import { downloadFabricMinecraftVersionToOpfs, isMinecraftVersionDownloaded } from "./minecraft";
 import { OpfsExplorer } from "./fs";
 
@@ -56,14 +58,14 @@ function App(this: FC<{}, { canvas: HTMLCanvasElement; fsOpen: boolean; benchRun
 	this.sampling = false;
 
 	this.cx.mount = async () => {
-		if (!(await isMinecraftVersionDownloaded("1.16.1-fabric-0.19.2", { verifyHashes: true })))
-			await downloadFabricMinecraftVersionToOpfs("1.16.1", { loaderVersion: "0.19.2" });
+		if (!(await isMinecraftVersionDownloaded("1.16.1-fabric-0.19.3", { verifyHashes: true })))
+			await downloadFabricMinecraftVersionToOpfs("1.16.1", { loaderVersion: "0.19.3" });
 		else
-			console.debug("downlaodead 1.16.1 fabric 0.19.2 already");
+			console.debug("downlaodead 1.16.1 fabric 0.19.3 already");
 
 		await initDotnet(this.canvas);
 
-		await play("1.16.1-fabric-0.19.2");
+		await play("1.16.1-fabric-0.19.3");
 	};
 
 	return (
@@ -86,7 +88,7 @@ function App(this: FC<{}, { canvas: HTMLCanvasElement; fsOpen: boolean; benchRun
 					}}
 				>Bench 60s</button>
 				<button on:click={() => (this.fsOpen = !this.fsOpen)}>Files</button>
-				<span>memory: gc {use(dotnetState.gcMemory).map(x=> x.toFixed(0))} · native {use(dotnetState.nativeUsed).map(x=> x.toFixed(0))}+{use(dotnetState.nativeFree).map(x=> x.toFixed(0))}free · wasm {use(dotnetState.memory).map(x=> (x / (1024 * 1024)).toFixed(0))} · ua {use(dotnetState.uaMemory).map(x=> (x / (1024 * 1024)).toFixed(0))} (mb)</span>
+				<span>memory: gc {use(dotnetState.gcMemory).map(x=> x.toFixed(0))} · native {use(dotnetState.nativeUsed).map(x=> x.toFixed(0))}+{use(dotnetState.nativeFree).map(x=> x.toFixed(0))}free · wasm {use(dotnetState.wasmMemory).map(x=> (x / (1024 * 1024)).toFixed(0))} · ua {use(dotnetState.uaMemory).map(x=> (x / (1024 * 1024)).toFixed(0))} (mb)</span>
 			</div>
 			<LogView scrolling={true} />
 			<OpfsExplorer open={use(this.fsOpen)} />

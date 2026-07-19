@@ -1,3 +1,4 @@
+import { console_log } from "./dotnet/log";
 import { init, EpoxyClient, WebSocketJsProvider, WispSocketProvider } from "./epoxy";
 import wasm from "./epoxy/epoxy.wasm?url";
 
@@ -8,6 +9,7 @@ await init({ module_or_path: wasm });
 export function createClient() {
 	let wisp = new WispSocketProvider(new WebSocketJsProvider(), "wss://anura.pro/");
 	client = new EpoxyClient(wisp);
+	(globalThis as any).client = client;
 }
 
 createClient();
@@ -119,6 +121,7 @@ export class EpxTcpWs extends EventTarget {
 					const { value, done } = await reader.read();
 					if (done || !value) break;
 
+					console_log("rx", value);
 					onmessage(value);
 				} catch (err) {
 					onerror();
@@ -150,6 +153,7 @@ export class EpxTcpWs extends EventTarget {
 			data = new Uint8Array(data);
 
 		this.bufferedAmount++;
+		console_log("tx", data);
 		this.ws.write(data).then(() => {
 			this.bufferedAmount--;
 		});
@@ -158,12 +162,12 @@ export class EpxTcpWs extends EventTarget {
 	close(_: number, __: string) {
 		if (this.readyState !== WebSocketFields.OPEN) return;
 
-		console.log("closing");
+		console_log("closing");
 		this.readyState = WebSocketFields.CLOSING;
 
 		this.ws?.close().then((x) => console.log("really closed", x));
 
-		console.log("closed");
+		console_log("closed");
 		this.readyState = WebSocketFields.CLOSED;
 		this.realOnClose(1000, "normal");
 	}

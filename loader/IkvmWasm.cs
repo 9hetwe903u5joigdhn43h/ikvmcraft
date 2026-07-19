@@ -1,8 +1,8 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.JavaScript;
 
@@ -15,7 +15,7 @@ struct Dll
 static partial class IkvmWasm
 {
     [DllImport("Emscripten")]
-    static internal extern void ikvm_gl_init();
+    static internal extern void ikvm_gl_init(int backend);
 
     internal static void Main()
     {
@@ -60,13 +60,11 @@ static partial class IkvmWasm
         }
     }
     [JSExport]
-    internal static Task PreInit(string fetchbase, string[] rawDlls, JSObject props)
+    internal static Task PreInit(int glBackend, string fetchbase, string[] rawDlls, JSObject props)
     {
         try
         {
             Emscripten.InstallThreadLogForwarder();
-            //WasmJitProbe.WasmJitProbeRun(); // after the forwarder so the emitter's g_printerr (worker stderr) reaches the page
-            //WasmJitProbe.WasmJitEhTest(); // deterministic EH-propagation + OP_THROW repro (re-enable + AOT=false to run)
 
             Emscripten.MountOpfs();
 
@@ -89,7 +87,7 @@ static partial class IkvmWasm
 
 			MountDlls(fetchbase, rawDlls);
 
-        	ikvm_gl_init();
+            ikvm_gl_init(glBackend);
 
             Directory.CreateDirectory("/tmp/lwjgl");
             File.WriteAllText("/tmp/lwjgl/liblwjgl.so", "");
@@ -99,6 +97,7 @@ static partial class IkvmWasm
             File.WriteAllText("/tmp/lwjgl/libffi.so", "");
             File.WriteAllText("/tmp/lwjgl/libglfw.so", "");
             File.WriteAllText("/tmp/lwjgl/libopenal.so", "");
+            File.WriteAllText("/tmp/lwjgl/libfreetype.so", "");
             File.WriteAllText("/tmp/lwjgl/libGL.so.1", "");
 
             File.WriteAllText("/ikvm.properties", "ikvm.home=/ikvm");
@@ -119,6 +118,7 @@ static partial class IkvmWasm
             }
 
 			IkvmNameService.Install();
+			IkvmSocketService.Install();
 
             return Task.CompletedTask;
         }
@@ -130,17 +130,10 @@ static partial class IkvmWasm
     }
 
     [JSExport]
-    internal static Task Run(string version, JSObject rawProfile)
+    internal static Task Run(string version)
     {
         try
         {
-			// each method entry is "mojmapMethodName|mojmapJvmDescriptor" e.g.
-			// "getBlockState|(Lnet/minecraft/util/math/BlockPos;)Lnet/minecraft/block/BlockState;"
-			IkvmPgoProfile profile = new(ConvertJSObjectToStringArray(rawProfile).ToDictionary(x => x[0], x => x.Skip(1).Select(x => {
-				var split = x.Split("|", 2);
-				return (split[0], split[1]);
-			}).ToArray()));
-
             Console.WriteLine($"[IKVM] running mc {version}");
 
             MinecraftLauncher.LaunchVanilla(new()
@@ -162,11 +155,8 @@ static partial class IkvmWasm
 
 					FixCrashReportTransform.Transformer,
 
-					RemoveDfuPreloadTransform.Transformer,
-					NoopAssertThreadTransform.Transformer,
-					NoopCheckAllocatedTransform.Transformer,
+					//RemoveDfuPreloadTransform.Transformer,
 				],
-				PgoProfile = profile,
             });
 
             return Task.CompletedTask;

@@ -14,9 +14,15 @@
 #include <string.h>
 #include <sys/stat.h>
 
-extern void krypton_proc_init();
-void ikvm_gl_init() {
-	krypton_proc_init();
+extern void gl_backend_select(int backend);
+extern void gl_backend_proc_init(void);
+/* Select the GL translation backend and initialize it. backend: 0 = NG-GL4ES (WebGL),
+ * 1 = MobileGL (GL 3.3 -> WebGPU) + SimpleFPEWrapper. Both are linked into libglfw3.a;
+ * this must run before the first GL context is created. The native dispatcher aborts if
+ * the backend is left unselected (there is no default). */
+void ikvm_gl_init(int backend) {
+	gl_backend_select(backend);
+	gl_backend_proc_init();
 }
 
 extern int managed_em_loop_callback(void);
@@ -85,7 +91,11 @@ EMSCRIPTEN_KEEPALIVE double ikvm_native_used_mb (void) { return (double) (uint32
 EMSCRIPTEN_KEEPALIVE double ikvm_native_free_mb (void) { return (double) (uint32_t) mallinfo ().fordblks / (1024.0 * 1024.0); }
 
 void classloader_debug(char* log) {
-	EM_ASM({ console.debug(UTF8ToString($0)); }, log);
+    char* copy = strdup(log);
+    MAIN_THREAD_ASYNC_EM_ASM({
+        console.debug(UTF8ToString($0));
+        _free($0);
+    }, copy);
 }
 void mono_interp_pgo_add_method (void *method);
 void ikvm_pgo_add_method (void *method) {

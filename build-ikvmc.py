@@ -56,6 +56,18 @@ BUNDLES: list[Bundle] = [
         prefixes=["org.objectweb.asm."],
         aot=True,
     ),
+    Bundle(
+        name="jvmdowngrader",
+        output_dir="statics",
+        output_dll="ikvmc_jvmdowngrader.dll",
+        jars=[
+            "file:statics/jvmdowngrader.jar",
+            "file:statics/jvmdg-java-api.jar"
+        ],
+        prefixes=["xyz.wagyourtail.jvmdg."],
+        aot=True,
+        always_replace=True,
+    ),
 
     # used by minecraft
     Bundle(

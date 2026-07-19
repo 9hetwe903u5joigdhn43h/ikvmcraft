@@ -231,6 +231,18 @@ internal class TinyV1Mappings : IMappings
 	}
 }
 
+internal sealed class IdentityClassMapping(string klass) : IClassMapping
+{
+	public string Name => klass;
+	public string GetField(string field) => field;
+	public string GetMethod(string method, string signature) => method;
+}
+
+internal sealed class IdentityMappings : IMappings
+{
+	public IClassMapping GetClass(string klass) => new IdentityClassMapping(klass);
+}
+
 internal struct IntermediaryClassMappings(IMappings OneMappings, IClassMapping One, IClassMapping Two) : IClassMapping
 {
 	public readonly string Name => Two.Name;
@@ -265,9 +277,9 @@ internal struct IntermediaryMappings(IMappings One, IMappings Two) : IMappings
 			return null;
 
 		var intermediary = Two.GetClass(official.Name);
-		//Console.WriteLine($"[Intermediary] GetClass Two {klass} {official.Name}"); 
+		//Console.WriteLine($"[Intermediary] GetClass Two {klass} {official.Name}");
 		if (intermediary == null)
-			return null;
+			return official;
 
 		//Console.WriteLine($"[Intermediary] GetClass End {klass} {official.Name} {intermediary.Name}"); 
 		return new IntermediaryClassMappings(One, official, intermediary);

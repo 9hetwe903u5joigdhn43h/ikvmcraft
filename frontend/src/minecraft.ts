@@ -1,4 +1,4 @@
-import { bypassDebug } from "./dotnet";
+import { console_debug } from "./dotnet/log";
 
 const DEFAULT_PRISM_META_BASE_URL = "https://meta.prismlauncher.org/v1/";
 const DEFAULT_MOJANG_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -432,6 +432,19 @@ async function assertIntegrity(
 		if (actualSha1 !== expectedSha1.toLowerCase()) {
 			throw new Error(`SHA-1 mismatch for ${context}: expected ${expectedSha1}, got ${actualSha1}.`);
 		}
+	}
+}
+
+// A jar is a zip, so it must start with the zip magic ("PK\x03\x04", or
+// "PK\x05\x06" for an empty archive). Many Fabric libraries (e.g. the
+// intermediary stub) ship no sha1/size in Prism meta, so assertIntegrity is a
+// no-op for them — this catches HTML error pages / truncated downloads that
+// would otherwise be cached silently and only blow up as a ZipException at
+// launch.
+function assertLooksLikeArchive(data: ArrayBuffer, context: string): void {
+	const header = new Uint8Array(data, 0, Math.min(4, data.byteLength));
+	if (header.length < 4 || header[0] !== 0x50 || header[1] !== 0x4b) {
+		throw new Error(`${context} is not a valid zip/jar (bad magic bytes; likely an error page or truncated download).`);
 	}
 }
 
@@ -902,6 +915,9 @@ export async function isMinecraftVersionDownloaded(
 			if (verifyHashes) {
 				const libraryData = await readFileArrayBuffer(root, libraryPath);
 				await assertIntegrity(libraryData, { sha1: library.sha1, size: library.size }, `library '${library.name}'`);
+				if (library.relativePath.endsWith(".jar")) {
+					assertLooksLikeArchive(libraryData, `library '${library.name}'`);
+				}
 			} else if (!(await fileExists(root, libraryPath))) {
 				warnDownloadCheckFailure(`Missing library '${library.name}' at '${libraryPath}'.`);
 				return false;
@@ -1018,7 +1034,7 @@ export async function isMinecraftVersionDownloaded(
 
 		const hashPrefix = assetObject.hash.slice(0, 2);
 		const objectPath = `${opfsRootDirectory}/assets/objects/${hashPrefix}/${assetObject.hash}`;
-		bypassDebug("[verify] path", objectPath);
+		console_debug("[verify] path", objectPath);
 		try {
 			if (verifyHashes) {
 				const objectData = await readFileArrayBuffer(root, objectPath);
@@ -1143,6 +1159,9 @@ export async function downloadFabricMinecraftVersionToOpfs(
 			{ sha1: library.sha1, size: library.size },
 			`fabric library '${library.name}'`,
 		);
+		if (library.relativePath.endsWith(".jar")) {
+			assertLooksLikeArchive(libraryData, `fabric library '${library.name}'`);
+		}
 		const libraryPath = `${opfsRootDirectory}/libraries/${library.relativePath}`;
 		await writeFileToOpfs(root, libraryPath, libraryData);
 	});

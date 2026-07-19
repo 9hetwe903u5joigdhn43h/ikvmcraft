@@ -1,6 +1,35 @@
 import { defineConfig } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
 
+// host proxy prefix -> upstream origin. followRedirects is enabled on every
+// route so 3xx responses are resolved against the upstream (e.g. fabricmc's
+// intermediary stub 302s to .../0.0.0/...) instead of being handed to the
+// browser, which would resolve the relative Location against the dev origin
+// and fetch the SPA index.html back.
+const PROXY_TARGETS: Record<string, string> = {
+	"/proxy/meta": "https://meta.prismlauncher.org",
+	"/proxy/piston-meta": "https://piston-meta.mojang.com",
+	"/proxy/piston-data": "https://piston-data.mojang.com",
+	"/proxy/launcher": "https://launcher.mojang.com",
+	"/proxy/resources": "https://resources.download.minecraft.net",
+	"/proxy/libraries": "https://libraries.minecraft.net",
+	"/proxy/maven-central": "https://repo1.maven.org",
+	"/proxy/maven-central-alt": "https://repo.maven.apache.org",
+	"/proxy/maven-fabricmc": "https://maven.fabricmc.net",
+};
+
+const proxy = Object.fromEntries(
+	Object.entries(PROXY_TARGETS).map(([prefix, target]) => [
+		prefix,
+		{
+			target,
+			changeOrigin: true,
+			followRedirects: true,
+			rewrite: (path: string) => path.slice(prefix.length),
+		},
+	]),
+);
+
 export default defineConfig({
 	plugins: [basicSsl()],
 	build: {
@@ -17,53 +46,7 @@ export default defineConfig({
 			"Cross-Origin-Opener-Policy": "same-origin",
 			"Cross-Origin-Embedder-Policy": "require-corp",
 		},
-		proxy: {
-			"/proxy/meta": {
-				target: "https://meta.prismlauncher.org",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/proxy\/meta/, ""),
-			},
-			"/proxy/piston-meta": {
-				target: "https://piston-meta.mojang.com",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/proxy\/piston-meta/, ""),
-			},
-			"/proxy/piston-data": {
-				target: "https://piston-data.mojang.com",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/proxy\/piston-data/, ""),
-			},
-			"/proxy/launcher": {
-				target: "https://launcher.mojang.com",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/proxy\/launcher/, ""),
-			},
-			"/proxy/resources": {
-				target: "https://resources.download.minecraft.net",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/proxy\/resources/, ""),
-			},
-			"/proxy/libraries": {
-				target: "https://libraries.minecraft.net",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/proxy\/libraries/, ""),
-			},
-			"/proxy/maven-central": {
-				target: "https://repo1.maven.org",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/proxy\/maven-central/, ""),
-			},
-			"/proxy/maven-central-alt": {
-				target: "https://repo.maven.apache.org",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/proxy\/maven-central-alt/, ""),
-			},
-			"/proxy/maven-fabricmc": {
-				target: "https://maven.fabricmc.net",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/proxy\/maven-fabricmc/, ""),
-			},
-		},
+		proxy,
 		port: 5021,
 		strictPort: true,
 		host: true,

@@ -34,8 +34,6 @@ internal sealed class MinecraftLaunchOptions
 	public IReadOnlyDictionary<string, string> ExtraLaunchVariables { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
 	public IReadOnlyDictionary<string, string> SystemProperties { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
 	public IReadOnlyList<IkvmClassLoaderTransformer> AsmTransformers { get; init; } = Array.Empty<IkvmClassLoaderTransformer>();
-
-	public IkvmPgoProfile PgoProfile { get; init; } = null;
 }
 
 internal sealed class MinecraftLaunchPlan
@@ -60,7 +58,6 @@ internal static class MinecraftLauncher
 
 		var versionJsonPath = RequireNonEmpty(options.VersionJsonPath, nameof(options.VersionJsonPath));
 		var versionJarPath = RequireNonEmpty(options.VersionJarPath, nameof(options.VersionJarPath));
-		var clientMappingsPath = RequireNonEmpty(options.ClientMappingsPath, nameof(options.ClientMappingsPath));
 		var libraryDirectoryPath = RequireNonEmpty(options.LibraryDirectoryPath, nameof(options.LibraryDirectoryPath));
 		var assetsRootPath = RequireNonEmpty(options.AssetsRootPath, nameof(options.AssetsRootPath));
 		var gameDirectoryPath = RequireNonEmpty(options.GameDirectoryPath, nameof(options.GameDirectoryPath));
@@ -73,11 +70,6 @@ internal static class MinecraftLauncher
 		if (!File.Exists(versionJarPath))
 		{
 			throw new FileNotFoundException($"Version JAR not found: {versionJarPath}", versionJarPath);
-		}
-
-		if (!File.Exists(clientMappingsPath))
-		{
-			throw new FileNotFoundException($"Client mappings not found: {clientMappingsPath}", clientMappingsPath);
 		}
 
 		if (!Directory.Exists(assetsRootPath))
@@ -174,7 +166,17 @@ internal static class MinecraftLauncher
 		var plan = BuildLaunchPlan(options, bundleMatch);
 		var transformers = options.AsmTransformers?.ToArray() ?? [];
 
-		Mappings.SetMappings(new MojmapMappings(File.ReadAllText(options.ClientMappingsPath)));
+		if (!string.IsNullOrEmpty(options.ClientMappingsPath) && File.Exists(options.ClientMappingsPath))
+		{
+			Mappings.SetMappings(new MojmapMappings(File.ReadAllText(options.ClientMappingsPath)));
+		}
+		else
+		{
+			// Minecraft 26.x+ ships unobfuscated with no proguard mappings — the jar
+			// already uses readable names, so map every name to itself.
+			Mappings.SetMappings(new IdentityMappings());
+			Console.WriteLine("[MinecraftLauncher] no client mappings found — assuming unobfuscated build (identity mappings)");
+		}
 
 		try {
 			java.net.URLClassLoader cl = new((from jar in plan.ClassPathJars select new java.net.URL("file", "", jar)).ToArray());
@@ -191,17 +193,6 @@ internal static class MinecraftLauncher
 		}
 
 		var loader = new IkvmClassLoader(plan.ClassPathJars, bundleMatch.ActiveDlls, transformers);
-
-		// The hot game classes are intermediary-named and only become loadable once fabric's Knot
-		// loader defines them (post-mixin). We can resolve mojmap->loaded *names* now (mappings are
-		// set), but the actual reflect.Method/MonoMethod has to wait until each class is defined. So
-		// register the profile; IkvmClassLoader.PgoOnClassDefined seeds the PGO table per class at the
-		// moment it is defined (Knot's defineClassFwd / our defineClass) — before any method compiles.
-		if (options.PgoProfile != null)
-		{
-			options.PgoProfile.Prepare();
-			IkvmClassLoader.PgoProfile = options.PgoProfile;
-		}
 
 		java.lang.Thread.currentThread().setContextClassLoader(loader);
 

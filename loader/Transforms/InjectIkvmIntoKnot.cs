@@ -4,14 +4,14 @@ using org.objectweb.asm.tree;
 
 public static class IkvmKnotBridge
 {
-	public static byte[] Transform(string name, byte[] array)
+	public static byte[] Transform(java.lang.ClassLoader loader, string name, byte[] array)
 	{
-		return IkvmClassLoader.LatestInstance.TransformClassBytecode(name, array);
+		return IkvmClassLoader.LatestInstance.TransformClassBytecode(loader, name, array);
 	}
 
 	public static void OnClassDefined(java.lang.Class klass)
 	{
-		IkvmClassLoader.PgoOnClassDefined(klass);
+		_ = klass;
 	}
 }
 
@@ -35,17 +35,16 @@ internal class InjectIkvmIntoKnotTransform(string name, ClassWriter writer) : Cl
 			JavaMatch.AStore(out var bytearrayLocal));
 
 		var skip = new LabelNode();
-		c.EmitALoad(nameLocal);
+		c.EmitALoad(bytearrayLocal);
 		c.EmitJump(Opcodes.IFNULL, skip);
+		c.EmitALoad(0);
+		c.EmitField(Opcodes.GETFIELD, "net/fabricmc/loader/impl/launch/knot/KnotClassDelegate", "classLoader", "Ljava/lang/ClassLoader;");
 		c.EmitALoad(nameLocal);
 		c.EmitALoad(bytearrayLocal);
-		c.EmitMethod(Opcodes.INVOKESTATIC, "cli/IkvmKnotBridge", "Transform", "(Ljava/lang/String;[B)[B");
+		c.EmitMethod(Opcodes.INVOKESTATIC, "cli/IkvmKnotBridge", "Transform", "(Ljava/lang/ClassLoader;Ljava/lang/String;[B)[B");
 		c.EmitAStore(bytearrayLocal);
 		c.EmitLabel(skip);
 
-		// Seed interp PGO the instant a class is defined: dup the Class returned by defineClassFwd
-		// (still on the stack, about to be areturn'd) and hand it to the bridge. This is post-define
-		// and pre-first-call, so a hot method is always tiered before mono ever compiles it tier-0.
 		c.GotoNext(
 			JavaMoveType.After,
 			JavaMatch.Method(Opcodes.INVOKEINTERFACE,

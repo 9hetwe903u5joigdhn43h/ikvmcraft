@@ -40,7 +40,7 @@ compute_sig() {
 	stat -c '%Y %s' "$IN" 2>/dev/null || true
 	# the exact filter args
 	printf 'ARG:%s\n' "${ARGS[@]}"
-	# contents of any @<file> curated lists (e.g. fastutil-aot-classes.txt)
+	# contents of any @<file> lists
 	local a
 	for a in "${ARGS[@]}"; do
 		if [[ "$a" == @* ]]; then

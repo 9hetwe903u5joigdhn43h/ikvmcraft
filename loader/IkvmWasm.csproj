@@ -33,15 +33,21 @@
 
 		<WasmBitcodeCompileOptimizationFlag>-O3</WasmBitcodeCompileOptimizationFlag>
 		<WasmNativeStrip>false</WasmNativeStrip>
-		<WasmNativeDebugSymbols>true</WasmNativeDebugSymbols>
+		<WasmNativeDebugSymbols>false</WasmNativeDebugSymbols>
 
 		<WebAssemblyEnableStreamingResponse>true</WebAssemblyEnableStreamingResponse>
 
 		<!-- MAXIMUM_MEMORY is 65535 wasm pages -->
-		<EmccExtraLDFlags>-sWASMFS -sMAXIMUM_MEMORY=4294901760 -sSTACK_SIZE=16MB -sMALLOC=dlmalloc -sOFFSCREENCANVAS_SUPPORT</EmccExtraLDFlags>
-		<EmccExtraLDFlags>$(EmccExtraLDFlags) -sMIN_FIREFOX_VERSION=2147483647 -sMIN_SAFARI_VERSION=2147483647 -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 -sFULL_ES3 -sFULL_ES2</EmccExtraLDFlags>
+		<EmccExtraLDFlags>-sWASMFS -sMAXIMUM_MEMORY=4294901760 -sSTACK_SIZE=1MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB -sMALLOC=dlmalloc -sOFFSCREENCANVAS_SUPPORT</EmccExtraLDFlags>
+		<EmccExtraLDFlags>$(EmccExtraLDFlags) -sMIN_FIREFOX_VERSION=2147483647 -sMIN_SAFARI_VERSION=2147483647 -sSUPPORT_LONGJMP=wasm</EmccExtraLDFlags>
 		<EmccExtraLDFlags>$(EmccExtraLDFlags) --js-library $(MSBuildProjectDirectory)/../statics/lib_emscripten_glfw3.js -Wl,--export=__stack_pointer</EmccExtraLDFlags>
-		<EmccExtraLDFlags>$(EmccExtraLDFlags) --js-library $(MSBuildProjectDirectory)/../statics/library_webgpu_enum_tables.js --js-library $(MSBuildProjectDirectory)/../statics/library_webgpu_generated_struct_info.js --js-library $(MSBuildProjectDirectory)/../statics/library_webgpu_generated_sig_info.js --js-library $(MSBuildProjectDirectory)/../statics/library_webgpu.js --js-library $(MSBuildProjectDirectory)/../statics/lib_mobilegl_webgpu.js</EmccExtraLDFlags>
+		<!-- wink -->
+		<EmccExtraLDFlags>$(EmccExtraLDFlags) --js-library $(MSBuildProjectDirectory)/../statics/wink-js/00-library_webgpu_enum_tables.js --js-library $(MSBuildProjectDirectory)/../statics/wink-js/01-library_webgpu_generated_struct_info.js --js-library $(MSBuildProjectDirectory)/../statics/wink-js/02-library_webgpu_generated_sig_info.js --js-library $(MSBuildProjectDirectory)/../statics/wink-js/03-library_webgpu.js --js-library $(MSBuildProjectDirectory)/../statics/wink-js/04-library_wink.js</EmccExtraLDFlags>
+		<!-- opfs stats -->
+		<EmccExtraLDFlags>$(EmccExtraLDFlags) -Wl,--export-if-defined=wasmfs_opfs_stat -Wl,--export-if-defined=wasmfs_opfs_stat_shape</EmccExtraLDFlags>
+		<!-- opfs cache -->
+		<EmccExtraLDFlags>$(EmccExtraLDFlags) -Wl,--export-if-defined=wasmfs_opfs_invalidate_negative_cache -Wl,--export-if-defined=wasmfs_opfs_negative_stat</EmccExtraLDFlags>
+		<EmccExtraLDFlags>$(EmccExtraLDFlags) -gseparate-dwarf=$(MSBuildProjectDirectory)/obj/dotnet.native.debug.wasm</EmccExtraLDFlags> <!-- keep only names section, not dwarf -->
 		<EmccLinkOptimizationFlag>-O3</EmccLinkOptimizationFlag>
 		<EmccCompileOptimizationFlag>-O3</EmccCompileOptimizationFlag>
 		<EmccEnvironment>web,worker</EmccEnvironment>
@@ -63,62 +69,11 @@
 		<EmscriptenEnvVars Include="WASM_ENABLE_JSPI=1" />
 
 		<AOTWhitelist Include="System.Private.CoreLib" />
-		<AOTWhitelist Include="System" />
-		<AOTWhitelist Include="System.Collections" />
-		<AOTWhitelist Include="System.Collections.Concurrent" />
-		<!--
-		<AOTWhitelist Include="System.Collections.Immutable" />
-		<AOTWhitelist Include="System.Collections.NonGeneric" />
-		<AOTWhitelist Include="System.Collections.Specialized" />
-		<AOTWhitelist Include="System.Console" />
-		<AOTWhitelist Include="System.Core" />
-		<AOTWhitelist Include="System.IO" />
-		<AOTWhitelist Include="System.Linq" />
-		<AOTWhitelist Include="System.Linq.AsyncEnumerable" />
-		<AOTWhitelist Include="System.Linq.Expressions" />
-		<AOTWhitelist Include="System.Linq.Parallel" />
-		<AOTWhitelist Include="System.Linq.Queryable" />
-		<AOTWhitelist Include="System.Private.DataContractSerialization" />
-		<AOTWhitelist Include="System.Private.Uri" />
-		<AOTWhitelist Include="System.Private.Xml" />
-		<AOTWhitelist Include="System.Private.Xml.Linq" />
-		-->
-		<AOTWhitelist Include="System.Reflection" />
-		<AOTWhitelist Include="System.Reflection.Emit" />
-		<AOTWhitelist Include="System.Reflection.Emit.ILGeneration" />
-		<AOTWhitelist Include="System.Reflection.Emit.Lightweight" />
-		<AOTWhitelist Include="System.Reflection.DispatchProxy" />
-		<AOTWhitelist Include="System.Reflection.Extensions" />
-		<AOTWhitelist Include="System.Reflection.Metadata" />
-		<AOTWhitelist Include="System.Reflection.Primitives" />
-		<AOTWhitelist Include="System.Reflection.TypeExtensions" />
-		<AOTWhitelist Include="mscorlib" />
-		<AOTWhitelist Include="netstandard" />
-		<AOTWhitelist Include="System.Text.RegularExpressions" />
-		<AOTWhitelist Include="System.IO.Hashing" />
 
-		<AOTWhitelist Include="IkvmWasm" />
 		<AOTWhitelist Include="IKVM.Runtime" />
+
 		<AOTWhitelist Include="IKVM.ByteCode" />
-		<AOTWhitelist Include="IKVM.CoreLib" />
-		<AOTWhitelist Include="IKVM.Java" />
-
-		<!-- ikvmc bundle <Reference> + <AOTWhitelist> + manifest <EmbeddedResource>
-		     are emitted by scripts/build-ikvmc.py into Generated.targets, imported
-		     below. AOT-eligibility per bundle is declared in the script's BUNDLES list. -->
-
-		<!-- profile-guided AOT: assembly name + path to .aotprofile. only methods
-		     present in the profile get AOT'd; everything else falls back to
-		     interpreter. one entry per assembly. -->
-		<AOTProfile Include="IKVM.Java">
-			<Profile>$(MSBuildProjectDirectory)/../statics/ikvm_java.aotprofile</Profile>
-		</AOTProfile>
-		<AOTProfile Include="ikvmc_fastutil-8.2.1">
-			<Profile>$(MSBuildProjectDirectory)/../jars/ikvmc_fastutil-8.2.1.aotprofile</Profile>
-		</AOTProfile>
-		<AOTProfile Include="ikvmc_lwjgl3">
-			<Profile>$(MSBuildProjectDirectory)/../statics/ikvmc_lwjgl3.aotprofile</Profile>
-		</AOTProfile>
+		<AOTWhitelist Include="System.Memory" />
 	</ItemGroup>
 
 	<!-- mirrors MonoAOTCompilerDefault{Aot,Process}Arguments from WasmApp.Common.targets.
@@ -169,7 +124,7 @@
 	     and removes the assembly from _WasmAssembliesInternal so the SDK target
 	     does not re-add it with the default AotArguments. _AotInputAssemblies
 	     items defined here survive into _WasmAotCompileApp. -->
-	<Target Name="AotApplyProfiles" BeforeTargets="_WasmAotCompileApp" Outputs="%(AOTProfile.Identity)" Condition="'$(_WasmShouldAOT)' == 'true'">
+	<Target Name="AotApplyProfiles" BeforeTargets="_WasmAotCompileApp" Outputs="%(AOTProfile.Identity)" Condition="'$(_WasmShouldAOT)' == 'true' and '@(AOTProfile)' != ''">
 		<PropertyGroup>
 			<_AotProfileAsmName>%(AOTProfile.Identity)</_AotProfileAsmName>
 			<_AotProfilePath>%(AOTProfile.Profile)</_AotProfilePath>
@@ -197,18 +152,24 @@
 		<NativeFileReference Include="..\statics\ikvm\libnio.a" />
 		<NativeFileReference Include="..\statics\ikvm\libnet.a" />
 		<NativeFileReference Include="..\statics\ikvm\libmanagement.a" />
-		<NativeFileReference Include="..\statics\ikvm\libjpeg.a" />
 		<NativeFileReference Include="..\statics\ikvm\libmlib_image.a" />
 		<NativeFileReference Include="..\statics\ikvm\liblcms.a" />
 		<NativeFileReference Include="..\statics\ikvm\libawt.a" />
 		<NativeFileReference Include="..\statics\ikvm\libfontmanager.a" />
 		<NativeFileReference Include="..\statics\ikvm\libfreetype.a" />
+		<NativeFileReference Include="..\statics\ikvm\libjavajpeg.a" />
+		<NativeFileReference Include="..\statics\ikvm\libawt_headless.a" />
+		<NativeFileReference Include="..\statics\ikvm\libprefs.a" />
+		<NativeFileReference Include="..\statics\ikvm\libmanagement_ext.a" />
 		<NativeFileReference Include="Emscripten.c" />
+		<!-- the registry (gen-static-libs.py) of the libraries the JDK loads -->
 		<NativeFileReference Include="statics.c" />
-		<NativeFileReference Include="icalls.c" />
 
 		<NativeFileReference Include="..\statics\SDL3.a" />
 		<NativeFileReference Include="..\statics\libglfw3.a" />
+		<NativeFileReference Include="..\statics\libwink.a" />
+		<NativeFileReference Include="..\statics\libwink_webgpu.a" />
+		<NativeFileReference Include="..\statics\libwink_tint.a" />
 		<NativeFileReference Include="..\statics\liblwjgl3.a" />
 		<NativeFileReference Include="..\statics\libffi.a" />
 		<NativeFileReference Include="..\statics\liblwjgl_stb.a" />

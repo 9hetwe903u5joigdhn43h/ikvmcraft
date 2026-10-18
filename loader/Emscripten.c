@@ -14,17 +14,6 @@
 #include <string.h>
 #include <sys/stat.h>
 
-extern void gl_backend_select(int backend);
-extern void gl_backend_proc_init(void);
-/* Select the GL translation backend and initialize it. backend: 0 = NG-GL4ES (WebGL),
- * 1 = MobileGL (GL 3.3 -> WebGPU) + SimpleFPEWrapper. Both are linked into libglfw3.a;
- * this must run before the first GL context is created. The native dispatcher aborts if
- * the backend is left unselected (there is no default). */
-void ikvm_gl_init(int backend) {
-	gl_backend_select(backend);
-	gl_backend_proc_init();
-}
-
 extern int managed_em_loop_callback(void);
 
 static void em_loop_wrapper() {
@@ -70,25 +59,26 @@ EMSCRIPTEN_KEEPALIVE void perform_thread_dump() {
 	mono_threads_request_thread_dump();
 }
 
-/* === native (dlmalloc) heap introspection (callable from JS via Module._ikvm_native_*) ===
- * Reads dlmalloc's own accounting instead of mono's GC. The previous mono_gc_* probes deadlocked
- * when called from the UI thread while mono held its GC lock on a worker; mallinfo() only takes the
- * (brief) malloc lock, so it's safe from any thread and stays live even when mono has wedged or
- * asserted near OOM. Managed-heap size still comes from the GC.GetTotalMemory Task path.
- *
- * used (uordblks) = bytes currently handed out to callers = live native allocations; a monotonic
- * climb here (while the managed heap is flat) is a native leak. free (fordblks) = free bytes sitting
- * inside the arena; a large/growing value while `used` is flat is fragmentation — the arena high-water
- * only ever grows because wasm linear memory can't shrink. Read alongside wasmMemory.buffer.byteLength
- * (total) + the managed GC sample, this splits native-leak vs fragmentation vs managed growth.
- *
- * NOTE: struct mallinfo fields are 32-bit int here (dlmalloc is built with MALLINFO_FIELD_TYPE=int,
- * and <malloc.h> matches), so a byte count above 2GB reads back signed-negative. The true value always
- * fits in 32 bits (< the ~4GB wasm max), so reinterpret the field as unsigned to recover it. If MALLOC
- * is ever switched away from dlmalloc (e.g. mimalloc) mallinfo() no longer populates these — use that
- * allocator's own stats API instead. */
-EMSCRIPTEN_KEEPALIVE double ikvm_native_used_mb (void) { return (double) (uint32_t) mallinfo ().uordblks / (1024.0 * 1024.0); }
-EMSCRIPTEN_KEEPALIVE double ikvm_native_free_mb (void) { return (double) (uint32_t) mallinfo ().fordblks / (1024.0 * 1024.0); }
+/* The page's memory monitor (frontend/src/dotnet/index.ts), polled every 5 s. All three are O(1) reads; this used to be
+ * mallinfo(), which walks every chunk under the malloc lock.
+ *   native:  the malloc heap's in-use chunk bytes (statics/emsdk dlmalloc, FNA-WASM-Build emsdk.10.patch) minus what the
+ *            GC holds through mono_valloc (nursery, major blocks, LOS, card tables): everything else that is allocated.
+ *   gc heap: that GC share, everything sgen has allocated (the gc number before it is
+ *            GC.GetGCMemoryInfo().TotalCommittedBytes, sgen's committed heap as of the last collection).
+ *   heap:    the sbrk break -- linear memory actually claimed, free holes and the sbrk'd assembly images included. This is
+ *            what runs into the 4 GiB; the wasm memory length grows ahead of it and never comes back down. */
+extern size_t emscripten_dlmalloc_inuse(void);
+extern size_t mono_mem_account_sgen_bytes(void);
+EMSCRIPTEN_KEEPALIVE double ikvm_native_used_mb(void) {
+  size_t inuse = emscripten_dlmalloc_inuse(), gc = mono_mem_account_sgen_bytes();
+  return (double)(inuse > gc ? inuse - gc : 0) / (1024.0 * 1024.0);
+}
+EMSCRIPTEN_KEEPALIVE double ikvm_gc_heap_mb(void) {
+  return (double)mono_mem_account_sgen_bytes() / (1024.0 * 1024.0);
+}
+EMSCRIPTEN_KEEPALIVE double ikvm_heap_top_mb(void) {
+  return (double)(size_t)sbrk(0) / (1024.0 * 1024.0);
+}
 
 void classloader_debug(char* log) {
     char* copy = strdup(log);

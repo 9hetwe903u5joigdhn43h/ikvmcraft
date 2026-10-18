@@ -14,8 +14,7 @@ struct Dll
 
 static partial class IkvmWasm
 {
-    [DllImport("Emscripten")]
-    static internal extern void ikvm_gl_init(int backend);
+    private const string GameDirectoryPath = "/libsdl/minecraft";
 
     internal static void Main()
     {
@@ -60,7 +59,7 @@ static partial class IkvmWasm
         }
     }
     [JSExport]
-    internal static Task PreInit(int glBackend, string fetchbase, string[] rawDlls, JSObject props)
+    internal static Task PreInit(string fetchbase, string[] jars, string[] rawDlls, JSObject props)
     {
         try
         {
@@ -68,26 +67,33 @@ static partial class IkvmWasm
 
             Emscripten.MountOpfs();
 
+            // Mods open relative paths, so set the process cwd before initializing Java.
+            Directory.CreateDirectory(GameDirectoryPath);
+            Directory.SetCurrentDirectory(GameDirectoryPath);
+
             Emscripten.MountFetch(0, fetchbase + "/image", "/ikvm");
+            // JDK 25's home: its configuration in conf/, data in lib/, and the libraries the JDK looks up by file before
+            // it loads them (they are linked into the wasm; the image has placeholders)
             Emscripten.MountFetchDir(0, "/ikvm/bin");
-            Emscripten.MountFetchFile(0, "/ikvm/bin/libzip.so");
-            Emscripten.MountFetchFile(0, "/ikvm/bin/libnio.so");
-            Emscripten.MountFetchFile(0, "/ikvm/bin/libnet.so");
-            Emscripten.MountFetchFile(0, "/ikvm/bin/libmanagement.so");
-            Emscripten.MountFetchFile(0, "/ikvm/bin/libawt.so");
-            Emscripten.MountFetchFile(0, "/ikvm/bin/libfontmanager.so");
-            Emscripten.MountFetchFile(0, "/ikvm/bin/libmlib_image.so");
-            Emscripten.MountFetchFile(0, "/ikvm/bin/liblcms.so");
-            Emscripten.MountFetchFile(0, "/ikvm/bin/libjpeg.so");
+            foreach (var lib in new[] { "zip", "nio", "net", "management", "management_ext", "prefs", "awt", "awt_headless", "fontmanager", "mlib_image", "lcms", "javajpeg" })
+                Emscripten.MountFetchFile(0, $"/ikvm/bin/lib{lib}.so");
+            Emscripten.MountFetchDir(0, "/ikvm/conf");
+            Emscripten.MountFetchFile(0, "/ikvm/conf/logging.properties");
+            Emscripten.MountFetchFile(0, "/ikvm/conf/net.properties");
+            Emscripten.MountFetchDir(0, "/ikvm/conf/security");
+            Emscripten.MountFetchFile(0, "/ikvm/conf/security/java.security");
+            Emscripten.MountFetchDir(0, "/ikvm/conf/security/policy");
+            Emscripten.MountFetchDir(0, "/ikvm/conf/security/policy/unlimited");
+            Emscripten.MountFetchFile(0, "/ikvm/conf/security/policy/unlimited/default_local.policy");
+            Emscripten.MountFetchFile(0, "/ikvm/conf/security/policy/unlimited/default_US_export.policy");
             Emscripten.MountFetchDir(0, "/ikvm/lib");
-            Emscripten.MountFetchFile(0, "/ikvm/lib/currency.data");
             Emscripten.MountFetchFile(0, "/ikvm/lib/tzdb.dat");
-            Emscripten.MountFetchFile(0, "/ikvm/lib/content-types.properties");
-            Emscripten.MountFetchFile(0, "/ikvm/lib/logging.properties");
+            Emscripten.MountFetchDir(0, "/ikvm/lib/security");
+            Emscripten.MountFetchFile(0, "/ikvm/lib/security/cacerts");
+            Emscripten.MountFetchFile(0, "/ikvm/lib/security/blocked.certs");
+            Emscripten.MountFetchFile(0, "/ikvm/lib/security/public_suffix_list.dat");
 
 			MountDlls(fetchbase, rawDlls);
-
-            ikvm_gl_init(glBackend);
 
             Directory.CreateDirectory("/tmp/lwjgl");
             File.WriteAllText("/tmp/lwjgl/liblwjgl.so", "");
@@ -102,23 +108,13 @@ static partial class IkvmWasm
 
             File.WriteAllText("/ikvm.properties", "ikvm.home=/ikvm");
 
-            // -- ikvm will init after this --
-            var bootstrapDlls = IkvmcManifest.LoadEmbedded().AlwaysReplaceDlls();
-            java.lang.Thread.currentThread().setContextClassLoader(new IkvmClassLoader([], bootstrapDlls, []));
-
-            java.lang.System.setProperty("org.lwjgl.system.allocator", "system");
-            java.lang.System.setProperty("org.lwjgl.system.SharedLibraryExtractPath", "/tmp/lwjgl");
-            java.lang.System.setProperty("org.lwjgl.librarypath", "/tmp/lwjgl");
-            java.lang.System.setProperty("log4j2.contextSelector", "org.apache.logging.log4j.core.selector.BasicContextSelector");
-
-            foreach (var prop in ConvertJSObjectToStringArray(props))
-            {
-                Console.WriteLine($"-D{prop[0]}={prop[1]}");
-                java.lang.System.setProperty(prop[0], prop[1]);
-            }
-
-			IkvmNameService.Install();
-			IkvmSocketService.Install();
+            // Accessing JVM.Properties.User loads IKVM and runs its module initializer before
+            // the assignment. AppContext supplies these values without initializing the JVM.
+            // Use the configured path because WasmFS getcwd drops the /libsdl mount name.
+            AppContext.SetData("IKVM.Properties", "user.dir;sun.nio.fs.chdirAllowed");
+            AppContext.SetData("user.dir", GameDirectoryPath);
+            AppContext.SetData("sun.nio.fs.chdirAllowed", "true");
+            InitializeJava(jars, props);
 
             return Task.CompletedTask;
         }
@@ -129,12 +125,71 @@ static partial class IkvmWasm
         }
     }
 
+    // Keep Java type initialization out of PreInit's compilation, until the filesystem and
+    // startup properties above are ready.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void InitializeJava(string[] jars, JSObject props)
+    {
+        // Also update the active properties if the JVM was initialized before PreInit.
+        // This must precede the classloader's first use of NIO.
+        java.lang.System.setProperty("user.dir", GameDirectoryPath);
+        java.lang.System.setProperty("sun.nio.fs.chdirAllowed", "true");
+
+        var bootstrapDlls = IkvmcManifest.LoadEmbedded().AlwaysReplaceDlls();
+        java.lang.Thread.currentThread().setContextClassLoader(new IkvmClassLoader(jars, bootstrapDlls, []));
+
+        java.lang.System.setProperty("org.lwjgl.system.allocator", "system");
+        java.lang.System.setProperty("org.lwjgl.system.SharedLibraryExtractPath", "/tmp/lwjgl");
+        java.lang.System.setProperty("org.lwjgl.librarypath", "/tmp/lwjgl");
+        java.lang.System.setProperty("log4j2.contextSelector", "org.apache.logging.log4j.core.selector.BasicContextSelector");
+
+        foreach (var prop in ConvertJSObjectToStringArray(props))
+        {
+            Console.WriteLine($"-D{prop[0]}={prop[1]}");
+            java.lang.System.setProperty(prop[0], prop[1]);
+        }
+
+        Console.WriteLine($"[IKVM] cwd={Directory.GetCurrentDirectory()}, user.dir={java.lang.System.getProperty("user.dir")}, nio.cwd={java.nio.file.Paths.get("", []).toAbsolutePath()}");
+
+        IkvmNameService.Install();
+        IkvmSocketService.Install();
+    }
+
+    // BENCHMARK/DIAGNOSTIC, off unless set: IKVM_GAME_OPTIONS=key:value[,key:value...] rewrites those lines of the game's
+    // options.txt before the game reads it -- maxFps:260 lifts Minecraft's own frame limiter, which holds a measurement at
+    // the seed's 120 once the client is fast enough to reach it. It changes what the game does, so like every knob it
+    // travels in the URL (?wj.IKVM_GAME_OPTIONS=...). A run's profile is a copy of the seed, so nothing persists.
+    static void ApplyGameOptionOverrides()
+    {
+        var spec = Environment.GetEnvironmentVariable("IKVM_GAME_OPTIONS");
+        if (string.IsNullOrEmpty(spec))
+            return;
+
+        var path = Path.Combine(GameDirectoryPath, "options.txt");
+        var lines = File.Exists(path) ? File.ReadAllLines(path).ToList() : new List<string>();
+        foreach (var kv in spec.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var colon = kv.IndexOf(':');
+            if (colon <= 0)
+                continue;
+            var prefix = kv[..(colon + 1)];
+            var at = lines.FindIndex(l => l.StartsWith(prefix, StringComparison.Ordinal));
+            if (at >= 0)
+                lines[at] = kv;
+            else
+                lines.Add(kv);
+        }
+        File.WriteAllLines(path, lines);
+        Console.WriteLine($"[IKVM] options.txt overrides applied: {spec}");
+    }
+
     [JSExport]
     internal static Task Run(string version)
     {
         try
         {
             Console.WriteLine($"[IKVM] running mc {version}");
+            ApplyGameOptionOverrides();
 
             MinecraftLauncher.LaunchVanilla(new()
             {
@@ -143,7 +198,7 @@ static partial class IkvmWasm
 				ClientMappingsPath = $"/libsdl/ikvmcraft/versions/{version}/client.txt",
                 LibraryDirectoryPath = "/libsdl/ikvmcraft/libraries/",
                 AssetsRootPath = "/libsdl/ikvmcraft/assets/",
-                GameDirectoryPath = "/libsdl/minecraft/",
+                GameDirectoryPath = GameDirectoryPath,
                 MinecraftOsName = "Emscripten",
 				PlayerName = "ikvmcraft",
                 AsmTransformers =
@@ -155,7 +210,16 @@ static partial class IkvmWasm
 
 					FixCrashReportTransform.Transformer,
 
-					//RemoveDfuPreloadTransform.Transformer,
+					LazyDfuTransform.Transformer,
+
+					// BENCHMARK ONLY, off unless IKVM_DEFUSE_RANKED_AUTH=1: MCSR Ranked's account
+					// validation never reaches a terminal socket status under this net bridge, so the
+					// modded main screen never finishes and the harness kills the run. See
+					// Transforms/Bench/DefuseRankedAuth.cs. Conditional rather than always-listed
+					// because it changes what the game does.
+					.. DefuseRankedAuthTransform.Enabled
+						? new[] { DefuseRankedAuthTransform.Transformer }
+						: [],
 				],
             });
 

@@ -62,7 +62,7 @@ class IkvmURLStreamHandlerFactory : java.net.URLStreamHandlerFactory
 	}
 }
 
-internal sealed class IkvmClassLoader : java.net.URLClassLoader
+internal sealed class IkvmClassLoader : java.net.URLClassLoader, ikvm.lang.LinkTrustPolicy
 {
 	static IkvmClassLoader()
 	{
@@ -77,8 +77,6 @@ internal sealed class IkvmClassLoader : java.net.URLClassLoader
 	private readonly java.lang.ClassLoader systemLoader;
 	private readonly List<(string Name, string[] Prefixes, java.lang.ClassLoader Loader)> dllLoaders;
 	private readonly List<(string[] Classes, Type Visitor)> classTransformers;
-
-	private readonly IkvmJvmDowngrader downgrader; 
 
 	public static IkvmClassLoader LatestInstance;
 
@@ -132,8 +130,6 @@ internal sealed class IkvmClassLoader : java.net.URLClassLoader
 			classTransformers.Add(transformer);
 		}
 
-		downgrader = new(this, "/libsdl/jvmdowngrader_cache");
-
 		LatestInstance = this;
 	}
 
@@ -186,8 +182,6 @@ internal sealed class IkvmClassLoader : java.net.URLClassLoader
 		}
 
 		bytes = CallerSensitiveLoggerFix.Apply(bytes);
-
-		bytes = downgrader.Downgrade(forLoader, name, bytes);
 
 		return bytes;
 	}
@@ -283,6 +277,18 @@ internal sealed class IkvmClassLoader : java.net.URLClassLoader
 				return loader.getResourceAsStream(resourceName);
 
 		return null;
+	}
+
+	public bool isEagerLinkSafe(string name)
+	{
+		if (name.StartsWith("java.", StringComparison.Ordinal) || name.StartsWith("javax.", StringComparison.Ordinal) || name.StartsWith("sun.", StringComparison.Ordinal))
+			return true;
+
+		foreach (var (_, prefixes, _) in dllLoaders)
+			if (prefixes.Any(x => name.StartsWith(x, StringComparison.Ordinal)))
+				return true;
+
+		return false;
 	}
 
 	protected override java.lang.Class loadClass(string name, bool resolve)

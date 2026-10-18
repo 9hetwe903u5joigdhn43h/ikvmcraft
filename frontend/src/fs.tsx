@@ -1,6 +1,7 @@
 import { css, FC } from "dreamland/core";
 
 import tar, { Headers as TarHeaders, Pack } from "tar-stream";
+import { opfsInvalidate } from "./opfs";
 import {
 	fromWeb as streamFromWeb,
 	toWeb as streamToWeb,
@@ -54,6 +55,7 @@ async function recursiveGetDirectory(
 async function copyFile(file: FileSystemFileHandle, to: FileSystemDirectoryHandle) {
 	const data = await file.getFile().then((r) => r.stream());
 	const handle = await to.getFileHandle(file.name, { create: true });
+	opfsInvalidate();
 	const writable = await handle.createWritable();
 	await data.pipeTo(writable);
 }
@@ -66,11 +68,13 @@ async function copyFolder(folder: FileSystemDirectoryHandle, to: FileSystemDirec
 				await copyFile(entry as FileSystemFileHandle, into);
 			} else {
 				const newTo = await into.getDirectoryHandle(name, { create: true });
+				opfsInvalidate();
 				await upload(entry as FileSystemDirectoryHandle, newTo);
 			}
 		}
 	}
 	const newFolder = await to.getDirectoryHandle(folder.name, { create: true });
+	opfsInvalidate();
 	await upload(folder, newFolder);
 }
 
@@ -180,14 +184,17 @@ export async function extractTar(
 		for (const name of path.splice(0, path.length - 1)) {
 			handle = await handle.getDirectoryHandle(name, { create: true });
 		}
+		opfsInvalidate();
 
 		if (header.type === "directory") {
 			await handle.getDirectoryHandle(path[0], { create: true });
+			opfsInvalidate();
 			await consume();
 
 			if (callback) callback("directory", path[0]);
 		} else if (header.type === "file") {
 			const file = await handle.getFileHandle(path[0], { create: true });
+			opfsInvalidate();
 			const writable = await file.createWritable();
 			await body.pipeTo(writable);
 

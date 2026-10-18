@@ -54,19 +54,7 @@ BUNDLES: list[Bundle] = [
             "org.ow2.asm:asm-util:9.9",
         ],
         prefixes=["org.objectweb.asm."],
-        aot=True,
-    ),
-    Bundle(
-        name="jvmdowngrader",
-        output_dir="statics",
-        output_dll="ikvmc_jvmdowngrader.dll",
-        jars=[
-            "file:statics/jvmdowngrader.jar",
-            "file:statics/jvmdg-java-api.jar"
-        ],
-        prefixes=["xyz.wagyourtail.jvmdg."],
-        aot=True,
-        always_replace=True,
+        aot=False,
     ),
 
     # used by minecraft
@@ -76,7 +64,7 @@ BUNDLES: list[Bundle] = [
         output_dll="ikvmc_lwjgl3.dll",
         jars=["file:statics/lwjgl3.jar"],
         prefixes=["org.lwjgl."],
-        aot=True,
+        aot=False,
         always_replace=True,
     ),
     Bundle(
@@ -98,7 +86,7 @@ BUNDLES: list[Bundle] = [
             "com.google.guava:guava:21.0",
         ],
         prefixes=["com.google.common."],
-        aot=True,
+        aot=False,
     ),
     Bundle(
         name="gson",
@@ -108,7 +96,7 @@ BUNDLES: list[Bundle] = [
             "com.google.code.gson:gson:2.8.0",
         ],
         prefixes=["com.google.gson."],
-        aot=True,
+        aot=False,
     ),
     Bundle(
         name="fastutil",
@@ -118,7 +106,7 @@ BUNDLES: list[Bundle] = [
             "it.unimi.dsi:fastutil:8.2.1",
         ],
         prefixes=["it.unimi.dsi.fastutil."],
-        aot=True,
+        aot=False,
     ),
     Bundle(
         name="netty",
@@ -128,13 +116,10 @@ BUNDLES: list[Bundle] = [
             "io.netty:netty-all:4.1.25.Final",
         ],
         prefixes=["io.netty."],
-        aot=True,
-        # Mojang's patchy ships only io.netty.bootstrap.Bootstrap; with netty-all AOT'd it would be the
-        # lone io.netty class still loaded JIT, splitting the io.netty.bootstrap package across loaders.
+        aot=False,
         hide_jars=["com.mojang:patchy:1.3.9"],
     ),
 ]
-
 
 @dataclass
 class ResolvedJar:

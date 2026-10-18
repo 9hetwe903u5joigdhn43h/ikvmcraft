@@ -1,4 +1,5 @@
 import { console_debug } from "./dotnet/log";
+import { opfsInvalidate } from "./opfs";
 
 const DEFAULT_PRISM_META_BASE_URL = "https://meta.prismlauncher.org/v1/";
 const DEFAULT_MOJANG_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -155,10 +156,15 @@ export interface DownloadMinecraftVersionToOpfsResult {
 	assetObjectsDirectoryPath: string;
 }
 
+// How thoroughly isMinecraftVersionDownloaded checks each file on disk:
+// "exists" only looks the file up, "size" compares the size from file metadata
+// without reading any contents, and "sha1" reads and hashes every file.
+export type VerificationMode = "exists" | "size" | "sha1";
+
 export interface IsMinecraftVersionDownloadedOptions {
 	opfsRootDirectory?: string;
 	verifyAssetObjects?: boolean;
-	verifyHashes?: boolean;
+	verification?: VerificationMode;
 	verifyClientMappings?: boolean;
 	mojangVersionManifestUrl?: string;
 	minecraftOsName?: string;
@@ -374,6 +380,26 @@ class Sha1WorkerPool {
 		}
 		console.warn("[minecraft] SHA-1 worker error.", event);
 	}
+
+	terminate(): void {
+		for (const worker of this.workers) {
+			worker.terminate();
+		}
+
+		// A terminated worker never answers, so settle anything still pending;
+		// getSha1Hex falls back to hashing on the main thread.
+		const error = new Error("SHA-1 worker pool was terminated.");
+		for (const callbacks of this.inflight.values()) {
+			callbacks.reject(error);
+		}
+		for (const task of this.queue) {
+			task.reject(error);
+		}
+		this.inflight.clear();
+		this.queue.length = 0;
+		this.workerToTaskId.clear();
+		this.idleWorkers.length = 0;
+	}
 }
 
 function resolveSha1WorkerCount(): number {
@@ -396,7 +422,27 @@ function createSha1WorkerPool(): Sha1WorkerPool | null {
 	}
 }
 
-const sha1WorkerPool = createSha1WorkerPool();
+// The pool only exists while something that hashes (a download or a sha1
+// verification pass) is running, and is torn down when the last one finishes.
+// Hashing outside of withSha1WorkerPool happens on the main thread.
+let sha1WorkerPool: Sha1WorkerPool | null = null;
+let sha1WorkerPoolUsers = 0;
+
+async function withSha1WorkerPool<T>(fn: () => Promise<T>): Promise<T> {
+	if (sha1WorkerPoolUsers === 0) {
+		sha1WorkerPool = createSha1WorkerPool();
+	}
+	sha1WorkerPoolUsers += 1;
+	try {
+		return await fn();
+	} finally {
+		sha1WorkerPoolUsers -= 1;
+		if (sha1WorkerPoolUsers === 0) {
+			sha1WorkerPool?.terminate();
+			sha1WorkerPool = null;
+		}
+	}
+}
 
 async function getSha1HexInline(data: ArrayBuffer): Promise<string> {
 	const digest = await crypto.subtle.digest("SHA-1", data);
@@ -462,6 +508,7 @@ async function getOrCreateDirectory(
 	for (const segment of pathSegments) {
 		current = await current.getDirectoryHandle(segment, { create: true });
 	}
+	opfsInvalidate();
 	return current;
 }
 
@@ -539,6 +586,38 @@ async function readFileArrayBuffer(root: FileSystemDirectoryHandle, path: string
 	return await file.arrayBuffer();
 }
 
+async function verifyOpfsFile(
+	root: FileSystemDirectoryHandle,
+	path: string,
+	expectation: IntegrityExpectation,
+	context: string,
+	verification: VerificationMode,
+): Promise<void> {
+	if (verification === "sha1") {
+		const data = await readFileArrayBuffer(root, path);
+		await assertIntegrity(data, expectation, context);
+		if (path.endsWith(".jar")) {
+			assertLooksLikeArchive(data, context);
+		}
+		return;
+	}
+
+	const fileHandle = await getFileHandleIfExists(root, path);
+	if (fileHandle === null) {
+		throw new Error(`Missing ${context} at '${path}'.`);
+	}
+
+	// getFile() hands back a lazy snapshot, so reading its size doesn't touch the
+	// contents. Entries with no size in their metadata only get the existence check.
+	const expectedSize = expectation.size;
+	if (verification === "size" && expectedSize !== undefined) {
+		const { size } = await fileHandle.getFile();
+		if (size !== expectedSize) {
+			throw new Error(`Size mismatch for ${context}: expected ${expectedSize}, got ${size}.`);
+		}
+	}
+}
+
 async function writeFileToOpfs(
 	root: FileSystemDirectoryHandle,
 	path: string,
@@ -552,6 +631,7 @@ async function writeFileToOpfs(
 
 	const directory = await getOrCreateDirectory(root, segments.slice(0, -1));
 	const fileHandle = await directory.getFileHandle(fileName, { create: true });
+	opfsInvalidate();
 	const writable = await fileHandle.createWritable();
 	try {
 		await writable.write(content);
@@ -729,6 +809,13 @@ export async function downloadMinecraftVersionToOpfs(
 	version: string,
 	options: DownloadMinecraftVersionToOpfsOptions = {},
 ): Promise<DownloadMinecraftVersionToOpfsResult> {
+	return await withSha1WorkerPool(() => downloadMinecraftVersionToOpfsImpl(version, options));
+}
+
+async function downloadMinecraftVersionToOpfsImpl(
+	version: string,
+	options: DownloadMinecraftVersionToOpfsOptions,
+): Promise<DownloadMinecraftVersionToOpfsResult> {
 	const prismMetaBaseUrl = ensureTrailingSlash(options.prismMetaBaseUrl ?? DEFAULT_PRISM_META_BASE_URL);
 	const mojangVersionManifestUrl = options.mojangVersionManifestUrl ?? DEFAULT_MOJANG_VERSION_MANIFEST_URL;
 	const resourceBaseUrl = ensureTrailingSlash(options.resourceBaseUrl ?? DEFAULT_RESOURCE_BASE_URL);
@@ -856,6 +943,16 @@ export async function isMinecraftVersionDownloaded(
 	version: string,
 	options: IsMinecraftVersionDownloadedOptions = {},
 ): Promise<boolean> {
+	if (options.verification === "sha1") {
+		return await withSha1WorkerPool(() => isMinecraftVersionDownloadedImpl(version, options));
+	}
+	return await isMinecraftVersionDownloadedImpl(version, options);
+}
+
+async function isMinecraftVersionDownloadedImpl(
+	version: string,
+	options: IsMinecraftVersionDownloadedOptions,
+): Promise<boolean> {
 	const resolvedVersion = ensureSafePathSegment(version, "version");
 	const opfsRootDirectory = ensureSafePathSegment(
 		options.opfsRootDirectory ?? DEFAULT_OPFS_ROOT_DIRECTORY,
@@ -863,7 +960,7 @@ export async function isMinecraftVersionDownloaded(
 	);
 	const minecraftOsName = normalizeMinecraftOsName(options.minecraftOsName);
 	const verifyAssetObjects = options.verifyAssetObjects ?? true;
-	const verifyHashes = options.verifyHashes ?? false;
+	const verification = options.verification ?? "exists";
 	const verifyClientMappings = options.verifyClientMappings ?? true;
 	const mojangVersionManifestUrl = options.mojangVersionManifestUrl ?? DEFAULT_MOJANG_VERSION_MANIFEST_URL;
 	const maxConcurrentAssetChecks = ensurePositiveInteger(
@@ -912,16 +1009,13 @@ export async function isMinecraftVersionDownloaded(
 	for (const library of libraries) {
 		const libraryPath = `${opfsRootDirectory}/libraries/${library.relativePath}`;
 		try {
-			if (verifyHashes) {
-				const libraryData = await readFileArrayBuffer(root, libraryPath);
-				await assertIntegrity(libraryData, { sha1: library.sha1, size: library.size }, `library '${library.name}'`);
-				if (library.relativePath.endsWith(".jar")) {
-					assertLooksLikeArchive(libraryData, `library '${library.name}'`);
-				}
-			} else if (!(await fileExists(root, libraryPath))) {
-				warnDownloadCheckFailure(`Missing library '${library.name}' at '${libraryPath}'.`);
-				return false;
-			}
+			await verifyOpfsFile(
+				root,
+				libraryPath,
+				{ sha1: library.sha1, size: library.size },
+				`library '${library.name}'`,
+				verification,
+			);
 		} catch (error) {
 			warnDownloadCheckFailure(`Library check failed for '${library.name}'.`, error);
 			return false;
@@ -929,12 +1023,13 @@ export async function isMinecraftVersionDownloaded(
 	}
 
 	try {
-		if (verifyHashes) {
-			const clientJarData = await readFileArrayBuffer(root, clientJarPath);
-			await assertIntegrity(
-				clientJarData,
+		if (verification !== "exists") {
+			await verifyOpfsFile(
+				root,
+				clientJarPath,
 				{ sha1: clientDownload.sha1, size: clientDownload.size },
 				`client jar '${resolvedVersion}'`,
+				verification,
 			);
 		}
 	} catch (error) {
@@ -959,17 +1054,13 @@ export async function isMinecraftVersionDownloaded(
 		const clientMappingsPath = `${versionDirectory}/${CLIENT_MAPPINGS_FILENAME}`;
 		if (clientMappingsDownload !== null) {
 			try {
-				if (verifyHashes) {
-					const mappingsData = await readFileArrayBuffer(root, clientMappingsPath);
-					await assertIntegrity(
-						mappingsData,
-						{ sha1: clientMappingsDownload.sha1, size: clientMappingsDownload.size },
-						`client mappings '${mappingsLookupVersion}'`,
-					);
-				} else if (!(await fileExists(root, clientMappingsPath))) {
-					warnDownloadCheckFailure(`Missing client mappings at '${clientMappingsPath}'.`);
-					return false;
-				}
+				await verifyOpfsFile(
+					root,
+					clientMappingsPath,
+					{ sha1: clientMappingsDownload.sha1, size: clientMappingsDownload.size },
+					`client mappings '${mappingsLookupVersion}'`,
+					verification,
+				);
 			} catch (error) {
 				warnDownloadCheckFailure(`Client mappings check failed for '${mappingsLookupVersion}'.`, error);
 				return false;
@@ -996,17 +1087,13 @@ export async function isMinecraftVersionDownloaded(
 
 	const assetIndexPath = `${opfsRootDirectory}/assets/indexes/${assetIndexId}.json`;
 	try {
-		if (verifyHashes) {
-			const assetIndexData = await readFileArrayBuffer(root, assetIndexPath);
-			await assertIntegrity(
-				assetIndexData,
-				{ sha1: assetIndexDownload.sha1, size: assetIndexDownload.size },
-				`asset index '${assetIndexId}'`,
-			);
-		} else if (!(await fileExists(root, assetIndexPath))) {
-			warnDownloadCheckFailure(`Missing asset index at '${assetIndexPath}'.`);
-			return false;
-		}
+		await verifyOpfsFile(
+			root,
+			assetIndexPath,
+			{ sha1: assetIndexDownload.sha1, size: assetIndexDownload.size },
+			`asset index '${assetIndexId}'`,
+			verification,
+		);
 	} catch (error) {
 		warnDownloadCheckFailure(`Asset index check failed for '${assetIndexId}'.`, error);
 		return false;
@@ -1036,16 +1123,13 @@ export async function isMinecraftVersionDownloaded(
 		const objectPath = `${opfsRootDirectory}/assets/objects/${hashPrefix}/${assetObject.hash}`;
 		console_debug("[verify] path", objectPath);
 		try {
-			if (verifyHashes) {
-				const objectData = await readFileArrayBuffer(root, objectPath);
-				await assertIntegrity(
-					objectData,
-					{ sha1: assetObject.hash, size: assetObject.size },
-					`asset object '${assetObject.hash}'`,
-				);
-			} else if (!(await fileExists(root, objectPath))) {
-				assetCheckError = new Error(`Missing asset object '${assetObject.hash}'.`);
-			}
+			await verifyOpfsFile(
+				root,
+				objectPath,
+				{ sha1: assetObject.hash, size: assetObject.size },
+				`asset object '${assetObject.hash}'`,
+				verification,
+			);
 		} catch (error) {
 			assetCheckError = error instanceof Error ? error : new Error(String(error));
 		}
@@ -1094,6 +1178,13 @@ export async function downloadFabricMinecraftVersionToOpfs(
 	mcVersion: string,
 	options: DownloadFabricMinecraftVersionToOpfsOptions = {},
 ): Promise<DownloadFabricMinecraftVersionToOpfsResult> {
+	return await withSha1WorkerPool(() => downloadFabricMinecraftVersionToOpfsImpl(mcVersion, options));
+}
+
+async function downloadFabricMinecraftVersionToOpfsImpl(
+	mcVersion: string,
+	options: DownloadFabricMinecraftVersionToOpfsOptions,
+): Promise<DownloadFabricMinecraftVersionToOpfsResult> {
 	const prismMetaBaseUrl = ensureTrailingSlash(options.prismMetaBaseUrl ?? DEFAULT_PRISM_META_BASE_URL);
 	const libraryBaseUrl = ensureTrailingSlash(options.libraryBaseUrl ?? DEFAULT_LIBRARY_BASE_URL);
 	const opfsRootDirectory = ensureSafePathSegment(
@@ -1113,9 +1204,7 @@ export async function downloadFabricMinecraftVersionToOpfs(
 			opfsRootDirectory: options.opfsRootDirectory,
 			minecraftOsName: options.minecraftOsName,
 			mojangVersionManifestUrl: options.mojangVersionManifestUrl,
-			verifyAssetObjects: false,
-			verifyHashes: false,
-			verifyClientMappings: false,
+			verification: "size",
 		}));
 	const vanillaResult = shouldDownloadVanilla
 		? await downloadMinecraftVersionToOpfs(requestedMcVersion, options)

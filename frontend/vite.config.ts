@@ -1,5 +1,32 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
+import { server as wisp, logging as wispLogging } from "@mercuryworkshop/wisp-js/server";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
+
+// A Wisp server on the dev server itself, at wss://<this origin>/wisp/, so the game's TCP/TLS traffic (epoxy, see
+// src/net.ts) no longer depends on an external proxy. It rides the HTTP server's `upgrade` event; vite's own HMR
+// socket only claims upgrades carrying its protocol header, so the two coexist. This works because `server.proxy`
+// below keeps vite on HTTP/1.1 over TLS -- HTTP/2, which vite uses for HTTPS without a proxy, has no `upgrade`.
+// wisp-js defaults refuse private and loopback destinations, which matters because `host: true` exposes this
+// server on every interface.
+wispLogging.set_level(wispLogging.WARN);
+function localWisp(): Plugin {
+	const attach = (httpServer: { on(ev: "upgrade", fn: (req: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown } | null) => {
+		httpServer?.on("upgrade", (req, socket, head) => {
+			if (req.url?.startsWith("/wisp/")) wisp.routeRequest(req, socket, head);
+		});
+	};
+	return {
+		name: "local-wisp",
+		configureServer(server) {
+			attach(server.httpServer);
+		},
+		configurePreviewServer(server) {
+			attach(server.httpServer);
+		},
+	};
+}
 
 // host proxy prefix -> upstream origin. followRedirects is enabled on every
 // route so 3xx responses are resolved against the upstream (e.g. fabricmc's
@@ -31,7 +58,7 @@ const proxy = Object.fromEntries(
 );
 
 export default defineConfig({
-	plugins: [basicSsl()],
+	plugins: [basicSsl(), localWisp()],
 	build: {
 		target: "es2022",
 	},

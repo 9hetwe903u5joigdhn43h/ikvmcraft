@@ -145,7 +145,7 @@ declare abstract class Provider<T, P> {
     constructor(provider: T, map: (provider: T) => P);
 }
 declare class JsProvider extends Provider<JsProvider$1, WasmWispProvider> {
-    constructor(func: (host: string) => Promise<ProviderResult> | ProviderResult);
+    constructor(func: (host: string, protocol?: string) => Promise<ProviderResult> | ProviderResult);
 }
 declare class WebSocketJsProvider extends JsProvider {
     constructor();
@@ -158,13 +158,11 @@ declare class WsProxyJsSocketProvider extends JsSocketProvider {
 }
 interface WispV2Handshake {
     builders: ProtocolExtensionBuilder[];
+    requiredExts: number[];
 }
 declare class WispSocketProvider extends Provider<WispProvider, WasmProvider> {
     clone(): WispProvider;
-    constructor(provider: JsProvider, server: string, connectionPrefs?: () => [
-        v2: WispV2Handshake | undefined,
-        requiredExts: number[]
-    ]);
+    constructor(provider: JsProvider, server: string, connectionPrefs?: () => WispV2Handshake | undefined);
     replaceMux(): Promise<void>;
     getExtensions(): Promise<WispExtensions | undefined>;
 }
@@ -199,6 +197,10 @@ declare class EpoxyWS {
     close(closeInfo?: EpoxyWSCloseInfo): void;
 }
 
+interface TlsStreamOptions {
+    bufferSize?: number;
+    alpn?: string[];
+}
 declare class EpoxyClient {
     constructor(provider: SocketProvider, redirectLimit?: number);
     get userAgent(): string;
@@ -206,7 +208,7 @@ declare class EpoxyClient {
     fetch(resource: Request | URL | string, options?: RequestInit): Promise<EpoxyResponse>;
     websocket(resource: string | URL, options?: EpoxyWebSocketOptions): Promise<EpoxyWS>;
     connect(host: string, port: number, bufferSize?: number): Promise<TcpStream>;
-    connectTls(host: string, port: number, bufferSize?: number): Promise<TlsStream>;
+    connectTls(host: string, port: number, options?: TlsStreamOptions): Promise<TlsStream>;
 }
 declare class TcpStream {
     read: ReadableStream<Uint8Array>;
@@ -215,6 +217,10 @@ declare class TcpStream {
 declare class TlsStream {
     read: ReadableStream<Uint8Array>;
     write: WritableStream<Uint8Array>;
+    negotiatedProtocol: string | null;
+    protocolVersion: string | null;
+    cipherSuite: string | null;
+    peerCertificates: Uint8Array[];
 }
 
 declare let version: {

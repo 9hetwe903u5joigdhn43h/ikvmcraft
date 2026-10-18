@@ -7,11 +7,12 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using java.net;
-using sun.net.spi.nameservice;
 using javax.net.ssl;
 using java.security.cert;
 using X509Certificate = javax.security.cert.X509Certificate;
 using Principal = java.security.Principal;
+using Security = java.security.Security;
+using SecProvider = java.security.Provider;
 
 /// <summary>
 /// Adapts a <see cref="ClientWebSocket"/> to full <see cref="Stream"/> semantics,
@@ -309,23 +310,25 @@ static class IkvmNetworkState
 	}
 }
 
-public class IkvmNameService : NameService
+// JDK 18+ resolves names through an InetAddressResolver (sun.net.spi.nameservice is gone): the one InetAddress has
+// already chosen when its resolver field is set, before the first lookup.
+public class IkvmNameService : java.net.spi.InetAddressResolver
 {
 	public static void Install()
 	{
 		_ = InetAddress.getByAddress([240, 0, 0, 0]);
 
-		var field = typeof(InetAddress).GetField("nameServices", BindingFlags.Static | BindingFlags.NonPublic);
-		field.SetValue(null, java.util.Arrays.asList(new IkvmNameService()));
+		var field = typeof(InetAddress).GetField("resolver", BindingFlags.Static | BindingFlags.NonPublic);
+		field.SetValue(null, new IkvmNameService());
 	}
 
-	public InetAddress[] lookupAllHostAddr(string host)
+	public java.util.stream.Stream lookupByName(string host, java.net.spi.InetAddressResolver.LookupPolicy lookupPolicy)
 	{
 		var (a, b, c, d) = IkvmNetworkState.GetFakeIP(host);
-		return [InetAddress.getByAddress([a, b, c, d])];
+		return java.util.Arrays.stream(new object[] { InetAddress.getByAddress([a, b, c, d]) });
 	}
 
-	public string getHostByAddr(byte[] addr)
+	public string lookupByAddress(byte[] addr)
 	{
 		var address = (addr[0], addr[1], addr[2], addr[3]);
 		try
@@ -345,6 +348,7 @@ public static class IkvmSocketService
 	public static void Install()
 	{
 		Socket.setSocketImplFactory(new EpoxySocketImplFactory());
+		Security.insertProviderAt(new EpoxyProvider(), 1);
 		HttpsURLConnection.setDefaultSSLSocketFactory(new EpoxySslSocketFactory());
 		HttpsURLConnection.setDefaultHostnameVerifier(new AllowAllHostnameVerifier());
 	}
@@ -352,6 +356,42 @@ public static class IkvmSocketService
 	private class AllowAllHostnameVerifier : HostnameVerifier
 	{
 		public bool verify(string hostname, SSLSession session) => true;
+	}
+
+	private class EpoxyProvider : SecProvider
+	{
+		private class EpoxyService(SecProvider p, string algo) : Service(p, "SSLContext", algo, "cli.IkvmSocketService$EpoxySslContextSpi", null, null)
+		{
+            public override object newInstance(object constructorParameter)
+            {
+				return new EpoxySslContextSpi();
+            }
+		}
+
+		public EpoxyProvider() : base("Epoxy", 1.0, "epoxy-tls socket backend")
+		{
+            foreach (var algo in new[] { "TLS", "TLSv1.2", "TLSv1.3", "SSL", "Default" })
+            {
+                putService(new EpoxyService(this, algo));
+            }
+		}
+	}
+
+	private class EpoxySslContextSpi : SSLContextSpi
+	{
+		private SSLSocketFactory SocketFactory;
+
+        protected override void engineInit(KeyManager[] km, TrustManager[] tm, java.security.SecureRandom sr)
+        {
+			SocketFactory = new EpoxySslSocketFactory();
+        }
+
+        protected override SSLSocketFactory engineGetSocketFactory() => SocketFactory;
+        protected override SSLServerSocketFactory engineGetServerSocketFactory() => throw new NotSupportedException("no server sockets");
+        protected override SSLEngine engineCreateSSLEngine() => throw new NotSupportedException("epoxy handles ssl internally");
+        protected override SSLEngine engineCreateSSLEngine(string host, int port) => throw new NotSupportedException("epoxy handles ssl internally");
+        protected override SSLSessionContext engineGetClientSessionContext() => null;
+        protected override SSLSessionContext engineGetServerSessionContext() => null;
 	}
 
 	private class EpoxySocketImplFactory : SocketImplFactory

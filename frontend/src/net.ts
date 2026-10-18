@@ -6,8 +6,20 @@ let client: EpoxyClient;
 
 await init({ module_or_path: wasm });
 
+// The Wisp server epoxy tunnels TCP/TLS through. Under the vite dev server that is the server itself (the
+// `local-wisp` plugin in vite.config.ts); a static production build has no such endpoint and keeps the public one.
+// `?wisp=<url>` overrides either, e.g. `?wisp=wss://anura.pro/` to compare against the external proxy.
+function wispUrl(): string {
+	const override = new URLSearchParams(location.search).get("wisp");
+	if (override) return override;
+	if (import.meta.env.DEV) return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/wisp/`;
+	return "wss://anura.pro/";
+}
+
 export function createClient() {
-	let wisp = new WispSocketProvider(new WebSocketJsProvider(), "wss://anura.pro/");
+	const url = wispUrl();
+	console.log("wisp server", url);
+	let wisp = new WispSocketProvider(new WebSocketJsProvider(), url);
 	client = new EpoxyClient(wisp);
 	(globalThis as any).client = client;
 }
@@ -36,6 +48,7 @@ export class EpxTcpWs extends EventTarget {
 	readyState: number = WebSocketFields.CONNECTING;
 
 	ws?: WritableStreamDefaultWriter;
+	reader?: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>;
 
 	binaryType: "blob" | "arraybuffer" = "blob";
 
@@ -47,6 +60,12 @@ export class EpxTcpWs extends EventTarget {
 	onerror?: (evt: Event) => void;
 
 	realOnClose: (code: number, reason: string) => void;
+	realOnError: () => void;
+
+	// close is raised from two places -- the read loop finishing, and close()/a failed write --
+	// but .NET's ClientWebSocket must only ever see one CloseEvent.
+	closeFired: boolean = false;
+	closeRequested: boolean = false;
 
 	constructor(remote: URL) {
 		super();
@@ -75,6 +94,9 @@ export class EpxTcpWs extends EventTarget {
 		};
 
 		const onclose = (code: number, reason: string) => {
+			if (this.closeFired) return;
+			this.closeFired = true;
+
 			this.readyState = WebSocketFields.CLOSED;
 			const event = new CloseEvent("close", { code, reason });
 			this.dispatchEvent(event);
@@ -88,6 +110,7 @@ export class EpxTcpWs extends EventTarget {
 			this.dispatchEvent(event);
 			if (this.onerror) this.onerror(event);
 		};
+		this.realOnError = onerror;
 
 		let type = remote.hostname.replace("wisp-", "");
 		let [host, _port] = remote.pathname.slice(1).split(":");
@@ -109,9 +132,18 @@ export class EpxTcpWs extends EventTarget {
 				return;
 			}
 
-			this.ws = ws.write.getWriter();
-
+			const writer = ws.write.getWriter();
 			const reader = ws.read.getReader();
+			this.ws = writer;
+			this.reader = reader;
+
+			if (this.closeRequested) {
+				// close() ran while the connect was still in flight. It has already fired the close
+				// event, so just drop the stream now that there is one to drop.
+				reader.cancel().then(undefined, (err) => console.log("cancel failed", err));
+				writer.close().then(undefined, (err) => console.log("close failed", err));
+				return;
+			}
 
 			this.readyState = WebSocketFields.OPEN;
 			onopen();
@@ -154,18 +186,35 @@ export class EpxTcpWs extends EventTarget {
 
 		this.bufferedAmount++;
 		console_log("tx", data);
-		this.ws.write(data).then(() => {
-			this.bufferedAmount--;
-		});
+		this.ws.write(data).then(
+			() => {
+				this.bufferedAmount--;
+			},
+			(err) => {
+				this.bufferedAmount--;
+				console.error("tcpws write failed", err);
+				this.realOnError();
+				this.realOnClose(1011, "epoxy.ts write errored");
+			}
+		);
 	}
 
 	close(_: number, __: string) {
-		if (this.readyState !== WebSocketFields.OPEN) return;
+		if (
+			this.readyState === WebSocketFields.CLOSING ||
+			this.readyState === WebSocketFields.CLOSED
+		)
+			return;
 
 		console_log("closing");
 		this.readyState = WebSocketFields.CLOSING;
+		this.closeRequested = true;
 
-		this.ws?.close().then((x) => console.log("really closed", x));
+		this.reader?.cancel().then(undefined, (err) => console.log("cancel failed", err));
+		this.ws?.close().then(
+			(x) => console.log("really closed", x),
+			(err) => console.log("close failed", err)
+		);
 
 		console_log("closed");
 		this.readyState = WebSocketFields.CLOSED;

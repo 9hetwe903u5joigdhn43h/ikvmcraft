@@ -16,16 +16,56 @@ string profileAsm = args[1];
 //   "@<path>"   -> read the file; each non-empty, non-'#' line is an EXACT type
 //                  name. Matches that type and its nested types ("<name>/..."),
 //                  but NOT sibling classes. Use for a precise, hand-curated list.
+// An "@<path>" list may also hold METHOD lines, "<type>::<name>(<parameter types>)" in mono's type names
+// ("java.util.zip.Deflater::deflateBytesBytes(long,byte[],int,int,byte[],int,int,int,int)"): a type named only by
+// method lines contributes exactly those methods. That is the form `--list-out` writes (R498).
+// and EXCLUSIONS, applied after them (plan A1, R419):
+//   "!<type>"         -> drop that exact type and its nested types from the profile.
+//   "!<type>::<name>" -> drop every method of that exact type with that name (all overloads).
+//   "!<prefix>*"      -> drop every type whose full name starts with <prefix> (a package: "!java.util.stream.*").
+// An excluded method gets no AOT body, so the runtime's JIT tier may compile it (an AOT body makes a method
+// permanently JIT-ineligible: interp.c's AOT check). Its AOT callers then pay an AOT->JIT transition per call --
+// census them first.
 List<string> prefixFilters = new();
 HashSet<string> exactFilters = new();
-foreach (var arg in args.Skip(2)) {
-	if (arg.StartsWith("@")) {
+HashSet<string> excludedTypes = new();
+HashSet<(string, string)> excludedMethods = new();
+List<string> excludedPrefixes = new();
+HashSet<string> exactMethods = new();
+HashSet<string> exactMethodTypes = new();
+// Regeneration (R498): --keep-symbols <file> keeps only the methods whose AOT symbol is listed (one per line, as V8's
+// perf map and the wasm name section spell them); --close adds, to a fixpoint, every method they reach by a direct call
+// that the filters admit; --list-out <file> writes the result as method lines.
+string? keepSymbolsPath = null, listOutPath = null;
+bool closeOverCalls = false;
+var filterArgs = args.Skip(2).ToList();
+for (int ai = 0; ai < filterArgs.Count; ai++) {
+	var arg = filterArgs[ai];
+	if (arg == "--keep-symbols") { keepSymbolsPath = filterArgs[++ai]; continue; }
+	if (arg == "--list-out") { listOutPath = filterArgs[++ai]; continue; }
+	if (arg == "--close") { closeOverCalls = true; continue; }
+	if (arg.StartsWith("!")) {
+		var x = arg.Substring(1);
+		int sep = x.IndexOf("::");
+		if (sep >= 0)
+			excludedMethods.Add((x.Substring(0, sep), x.Substring(sep + 2)));
+		else if (x.Length > 1 && x.EndsWith("*"))
+			excludedPrefixes.Add(x.Substring(0, x.Length - 1));
+		else
+			excludedTypes.Add(x);
+	} else if (arg.StartsWith("@")) {
 		var path = arg.Substring(1);
 		foreach (var raw in File.ReadAllLines(path)) {
 			var line = raw.Trim();
 			if (line.Length == 0 || line.StartsWith("#"))
 				continue;
-			exactFilters.Add(line);
+			int sep = line.IndexOf("::");
+			if (sep > 0) {
+				exactMethods.Add(line);
+				exactMethodTypes.Add(line.Substring(0, sep));
+			} else {
+				exactFilters.Add(line);
+			}
 		}
 	} else {
 		prefixFilters.Add(arg);
@@ -132,6 +172,26 @@ string MonoSignature(MethodDefinition m)
 	return sb.ToString();
 }
 
+// The readable key of a method list line.
+string MethodKey(TypeDefinition td, MethodDefinition m) =>
+	MonoTypeFullName(td) + "::" + m.Name + "(" + string.Join(",", m.Parameters.Select(p => MonoTypeName(p.ParameterType))) + ")";
+
+// mono's get_debug_sym (aot-compiler.c): alphanumerics kept, " ()" dropped, ", " -> "_", '(' ')' '>' dropped, else '_'.
+string DebugSym(string name1)
+{
+	var sb = new StringBuilder();
+	for (int i = 0; i < name1.Length; ++i) {
+		char c = name1[i];
+		if (i == 0 && c >= '0' && c <= '9') sb.Append('_');
+		else if (c < 0x80 && char.IsLetterOrDigit(c)) sb.Append(c);
+		else if (c == ' ' && i + 2 < name1.Length && name1[i + 1] == '(' && name1[i + 2] == ')') i += 2;
+		else if (c == ',' && i + 1 < name1.Length && name1[i + 1] == ' ') { sb.Append('_'); i++; }
+		else if (c == '(' || c == ')' || c == '>') { }
+		else sb.Append('_');
+	}
+	return sb.ToString();
+}
+
 string MonoTypeFullName(TypeDefinition td)
 {
 	if (td.IsNested)
@@ -147,7 +207,7 @@ IEnumerable<TypeDefinition> WalkTypes(TypeDefinition td)
 			yield return x;
 }
 
-Console.Error.WriteLine($"Writing aot profile '{profileOut}' for asm '{profileAsm}' with {prefixFilters.Count} prefix filter(s) and {exactFilters.Count} exact filter(s)");
+Console.Error.WriteLine($"Writing aot profile '{profileOut}' for asm '{profileAsm}' with {prefixFilters.Count} prefix filter(s), {exactFilters.Count} exact filter(s), {excludedTypes.Count} excluded type(s), {excludedPrefixes.Count} excluded prefix(es) and {excludedMethods.Count} excluded method name(s)");
 
 var asm = AssemblyDefinition.ReadAssembly(profileAsm);
 var mod = asm.MainModule;
@@ -155,24 +215,133 @@ var mod = asm.MainModule;
 var profileMvid = mod.Mvid.ToString();
 var profileName = asm.Name.Name;
 List<(TypeDefinition td, List<MethodDefinition> methods)> profileTypes = new();
+HashSet<string> foundMethods = new();
 
 foreach (var top in mod.Types) {
 	foreach (var ty in WalkTypes(top)) {
 		if (ty.Name.StartsWith("<"))
 			continue;
 
-		if (!CheckFilters(ty.FullName))
+		bool wholeType = CheckFilters(ty.FullName);
+		bool listedType = exactMethodTypes.Contains(MonoTypeFullName(ty));
+		if (!wholeType && !listedType)
 			continue;
+		if (excludedTypes.Contains(ty.FullName)) {
+			Console.Error.WriteLine($"Excluded type '{ty.FullName}'");
+			continue;
+		}
+		if (excludedPrefixes.Any(p => ty.FullName.StartsWith(p))) {
+			Console.Error.WriteLine($"Excluded type '{ty.FullName}' (prefix)");
+			continue;
+		}
+		{
+			int slash = ty.FullName.IndexOf('/');
+			if (slash >= 0 && excludedTypes.Contains(ty.FullName.Substring(0, slash))) {
+				Console.Error.WriteLine($"Excluded nested type '{ty.FullName}'");
+				continue;
+			}
+		}
 
 		var methods = new List<MethodDefinition>();
-		foreach (var m in ty.Methods)
+		foreach (var m in ty.Methods) {
+			if (excludedMethods.Contains((ty.FullName, m.Name))) {
+				Console.Error.WriteLine($"Excluded method '{ty.FullName}::{m.Name}'");
+				continue;
+			}
+			if (!wholeType) {
+				var key = MethodKey(ty, m);
+				if (!exactMethods.Contains(key))
+					continue;
+				foundMethods.Add(key);
+			}
 			methods.Add(m);
+		}
 
 		if (methods.Count > 0) {
 			Console.WriteLine($"Got {methods.Count} methods for type '{ty.FullName}'");
 			profileTypes.Add((ty, methods));
 		}
 	}
+}
+
+if (exactMethods.Count > 0) {
+	var stale = exactMethods.Where(x => !foundMethods.Contains(x)).ToList();
+	Console.Error.WriteLine($"{exactMethods.Count - stale.Count} of {exactMethods.Count} listed methods found");
+	foreach (var x in stale.Take(20))
+		Console.Error.WriteLine($"  listed method not in '{profileAsm}' (or filtered out): {x}");
+}
+
+if (keepSymbolsPath != null) {
+	// An AOT method's symbol is the assembly name + "_" + mono's get_debug_sym of "<type>:<name> (<params>)"
+	// (aot-compiler.c, sanitized); a name that collides gets "_<n>", so a collided name keeps every method sharing it.
+	string symPrefix = System.Text.RegularExpressions.Regex.Replace(profileName, "[^A-Za-z0-9_]", "_") + "_";
+	var bySym = new Dictionary<string, List<MethodDefinition>>();
+	foreach (var (td, ms) in profileTypes)
+		foreach (var m in ms) {
+			var k = symPrefix + DebugSym(MonoTypeFullName(td) + ":" + m.Name + " (" + string.Join(",", m.Parameters.Select(x => MonoTypeName(x.ParameterType))) + ")");
+			if (!bySym.TryGetValue(k, out var l)) bySym[k] = l = new();
+			l.Add(m);
+		}
+	var keep = new HashSet<MethodDefinition>();
+	int seeds = 0, unmapped = 0;
+	foreach (var raw in File.ReadAllLines(keepSymbolsPath)) {
+		var w = raw.Trim();
+		if (w.Length == 0 || w.StartsWith("#")) continue;
+		seeds++;
+		if (!bySym.TryGetValue(w, out var hit)) {
+			var mm = System.Text.RegularExpressions.Regex.Match(w, @"^(.*)_\d+$");
+			if (!(mm.Success && bySym.TryGetValue(mm.Groups[1].Value, out hit) && hit.Count > 1)) { unmapped++; continue; }
+		}
+		foreach (var m in hit) keep.Add(m);
+	}
+	Console.Error.WriteLine($"--keep-symbols: {seeds} symbols -> {keep.Count} methods ({unmapped} name no method in the filtered set: wrappers, or filtered out)");
+	if (closeOverCalls) {
+		// A call from an AOT'd method to a same-image method outside the profile compiles to an indirect call that may
+		// enter the interpreter (mono calls.c can_enter_interp), and a callee LLVM inlined into its AOT callers never
+		// shows in a perf map -- so a profile cut to what ran pays a boundary crossing at every such site (R498).
+		var eligible = new HashSet<MethodDefinition>(profileTypes.SelectMany(x => x.methods));
+		var work = new Stack<MethodDefinition>(keep);
+		int before = keep.Count;
+		while (work.Count > 0) {
+			var m = work.Pop();
+			if (!m.HasBody) continue;
+			foreach (var ins in m.Body.Instructions) {
+				var c = ins.OpCode.Code;
+				if (c != Mono.Cecil.Cil.Code.Call && c != Mono.Cecil.Cil.Code.Newobj && c != Mono.Cecil.Cil.Code.Callvirt && c != Mono.Cecil.Cil.Code.Ldftn) continue;
+				if (ins.Operand is not MethodReference mr) continue;
+				MethodDefinition? md = null;
+				try { md = mr.Resolve(); } catch { }
+				if (md == null || !eligible.Contains(md) || keep.Contains(md)) continue;
+				// a virtual call stays indirect whatever the profile; mono devirtualizes non-virtual, final and sealed targets
+				if (c == Mono.Cecil.Cil.Code.Callvirt && md.IsVirtual && !md.IsFinal && !md.DeclaringType.IsSealed) continue;
+				keep.Add(md);
+				work.Push(md);
+			}
+		}
+		Console.Error.WriteLine($"--close: {before} -> {keep.Count} methods");
+	}
+	profileTypes = profileTypes.Select(x => (x.td, x.methods.Where(keep.Contains).ToList())).Where(x => x.Item2.Count > 0).ToList();
+} else if (closeOverCalls) {
+	Console.Error.WriteLine("--close needs --keep-symbols: the filter arguments bound what the closure may add");
+	return 1;
+}
+
+if (listOutPath != null) {
+	var lines = new List<string> {
+		"# IKVM.Java methods to AOT-compile, one per line: <type>::<name>(<parameter types>), in mono's type names; a line",
+		"# covers every method with that name and parameter list (IKVM's covariant bridges differ only in return type).",
+		$"# Generated by aotprofile/Program.cs --list-out ({profileTypes.Sum(x => x.methods.Count)} methods" +
+			(keepSymbolsPath != null ? $" from {Path.GetFileName(keepSymbolsPath)}{(closeOverCalls ? ", closed over direct calls" : "")}" : "") +
+			"). Regenerate rather than hand-edit: see the Makefile's aot-java-methods target.",
+	};
+	// A line names every method with that name and parameter list: IKVM emits return-type overloads (covariant bridges).
+	var seen = new HashSet<string>();
+	foreach (var (td, ms) in profileTypes)
+		foreach (var m in ms)
+			if (seen.Add(MethodKey(td, m)))
+				lines.Add(MethodKey(td, m));
+	File.WriteAllLines(listOutPath, lines);
+	Console.Error.WriteLine($"--list-out: wrote {lines.Count - 3} lines to '{listOutPath}'");
 }
 
 Console.Error.WriteLine($"Collected {profileTypes.Count} types ({profileTypes.Select(x => x.methods.Count).Sum()} methods)");
@@ -237,3 +406,4 @@ WriteSInt(0);
 
 await using var file = File.Create(profileOut);
 await file.WriteAsync(buf.WrittenMemory);
+return 0;

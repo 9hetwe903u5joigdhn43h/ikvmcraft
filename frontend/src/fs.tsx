@@ -300,16 +300,48 @@ export function OpfsExplorer(
 		this.downloading = false;
 	};
 
-	const uploadArchive = async () => {
-		const files = await showOpenFilePicker({ multiple: true });
+	const uploadArchiveFiles = async (files: File[]) => {
+		if (files.length === 0) return;
 		this.uploading = true;
-		for (const file of files) {
-			let stream = await file.getFile().then((r) => r.stream());
-			if (file.name.endsWith(".gz")) stream = stream.pipeThrough(new DecompressionStream("gzip"));
-			await extractTar(stream, this.path, (type, name) => console.log(`untarring ${type} ${name}`));
+		try {
+			for (const file of files) {
+				let stream = file.stream();
+				if (file.name.endsWith(".gz")) stream = stream.pipeThrough(new DecompressionStream("gzip"));
+				await extractTar(stream, this.path, (type, name) => console.log(`untarring ${type} ${name}`));
+			}
+		} finally {
+			this.path = this.path;
+			this.uploading = false;
 		}
-		this.path = this.path;
-		this.uploading = false;
+	};
+
+	const archiveInput: HTMLInputElement = (
+		<input
+			type="file"
+			accept=".tar,.tar.gz"
+			multiple
+			hidden
+			on:change={() => {
+				const files = Array.from(archiveInput.files || []);
+				archiveInput.value = "";
+				return uploadArchiveFiles(files);
+			}}
+		/>
+	) as HTMLInputElement;
+
+	const uploadArchive = async () => {
+		if (!window.showOpenFilePicker) {
+			archiveInput.click();
+			return;
+		}
+		let handles: FileSystemFileHandle[];
+		try {
+			handles = await showOpenFilePicker({ multiple: true });
+		} catch (error) {
+			if (error instanceof DOMException && error.name === "AbortError") return;
+			throw error;
+		}
+		await uploadArchiveFiles(await Promise.all(handles.map((file) => file.getFile())));
 	};
 
 	const uploadDisabled = use(this.uploading).map((x) => x || PICKERS_UNAVAILABLE);
@@ -335,7 +367,8 @@ export function OpfsExplorer(
 				<button disabled={uploadDisabled} on:click={uploadFolder}>
 					Upload Folder
 				</button>
-				<button disabled={uploadDisabled} on:click={uploadArchive} title="Extract a .tar/.tar.gz here">
+				{archiveInput}
+				<button disabled={use(this.uploading)} on:click={uploadArchive} title="Extract a .tar/.tar.gz here">
 					Upload Archive
 				</button>
 				<button disabled={downloadDisabled} on:click={downloadArchive} title="Download this folder as a .tar/.tar.gz">

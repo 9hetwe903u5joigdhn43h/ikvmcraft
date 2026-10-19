@@ -1,5 +1,5 @@
 STATICS_RELEASE=aadadf08-10aa-4a8f-98eb-9a4fcb20818a
-IKVM_RELEASE=e1058610-d34d-472c-9155-7413b710e239
+IKVM_RELEASE=f9e2526c-5338-404d-b039-08d2693c0883
 # 3.0.0-alpha.4
 EPOXY_BASE=https://puter-net.b-cdn.net/epoxy/68c6904
 DOTNETFLAGS=--nodereuse:false -v n

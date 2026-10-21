@@ -67,7 +67,7 @@ function App(
 	this.fsOpen = false;
 	this.ready = false;
 
-	let version = "1.16.5";
+	let version = new URLSearchParams(location.search).get("mcver") || "26.2";
 	let fabric = "0.19.5";
 	this.cx.mount = async () => {
 		if (new URLSearchParams(location.search).has("bench"))

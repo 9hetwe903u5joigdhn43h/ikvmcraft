@@ -191,7 +191,7 @@ export async function initDotnet(canvas: HTMLCanvasElement) {
 		.withEnvironmentVariable("MONO_SLEEP_ABORT_LIMIT", "20000")
 		.withEnvironmentVariable(
 			"MONO_GC_PARAMS",
-			"nursery-size=128m,tlab-size=64k,max-heap-size=2560m,default-allowance-ratio=1.0"
+			"nursery-size=64m,tlab-size=64k,max-heap-size=2560m,default-allowance-ratio=2.0"
 		)
 		//.withEnvironmentVariable("MONO_GC_DEBUG", "binary-protocol=/gcproto:64m")
 		//.withEnvironmentVariable("MONO_GC_DEBUG", "print-pinning,print-gchandles")
@@ -288,6 +288,7 @@ export async function initDotnet(canvas: HTMLCanvasElement) {
 		["org.lwjgl.util.Debug", "true"],
 		["org.lwjgl.util.DebugLoader", "true"],
 		["java.awt.headless", "true"],
+		["sodium.checks.issue2561", "false"]
 	];
 	// ?jprop.<name>=<value>: extra Java system properties, e.g. the jbox2d bench's schedule (bench.warmup /
 	// bench.batchSteps / bench.batches, read by IkvmBenchmarkStarter; scratchpad/wj/j2d/run.mjs --schedule).

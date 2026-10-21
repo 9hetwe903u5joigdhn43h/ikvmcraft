@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@ktibow/iconset-material-symbols':
+        specifier: 0.0.1747426012
+        version: 0.0.1747426012
       dreamland:
         specifier: github:mercuryworkshop/dreamlandjs
         version: https://codeload.github.com/mercuryworkshop/dreamlandjs/tar.gz/9dfb8bc19b186d955d8fed4cee4aa4a19197d778
@@ -21,6 +24,9 @@ importers:
         specifier: ^3.2.0
         version: 3.2.0
     devDependencies:
+      '@iconify/types':
+        specifier: 2.0.0
+        version: 2.0.0
       '@mercuryworkshop/wisp-js':
         specifier: ^0.5.0
         version: 0.5.0
@@ -197,6 +203,12 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@iconify/types@2.0.0':
+    resolution: {integrity: sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg==}
+
+  '@ktibow/iconset-material-symbols@0.0.1747426012':
+    resolution: {integrity: sha512-lLiDCN8lSwzZvva+kF5J+q8MkVGpXfPlEc7IB/VSCTWv8rGt1XShE64gqwCgS4v0kk4tG7k6U90+EZwENZZ4vQ==}
 
   '@mercuryworkshop/wisp-js@0.5.0':
     resolution: {integrity: sha512-YIPnONZdMYRXLdttL/zQM2PwjHQw3LfNPWTP54Lqhehs79lcORY8rwv5j7bGnuz9S31rZIh1OEzldubE9dtnoA==}
@@ -764,6 +776,12 @@ snapshots:
 
   '@esbuild/win32-x64@0.27.3':
     optional: true
+
+  '@iconify/types@2.0.0': {}
+
+  '@ktibow/iconset-material-symbols@0.0.1747426012':
+    dependencies:
+      '@iconify/types': 2.0.0
 
   '@mercuryworkshop/wisp-js@0.5.0':
     dependencies:

@@ -149,8 +149,6 @@ static partial class IkvmWasm
             java.lang.System.setProperty(prop[0], prop[1]);
         }
 
-        Console.WriteLine($"[IKVM] cwd={Directory.GetCurrentDirectory()}, user.dir={java.lang.System.getProperty("user.dir")}, nio.cwd={java.nio.file.Paths.get("", []).toAbsolutePath()}");
-
         IkvmNameService.Install();
         IkvmSocketService.Install();
     }
@@ -184,7 +182,7 @@ static partial class IkvmWasm
     }
 
     [JSExport]
-    internal static Task Run(string version)
+    internal static Task Run(string version, string playerName, string uuid, string accessToken, string userType)
     {
         try
         {
@@ -200,7 +198,6 @@ static partial class IkvmWasm
                 AssetsRootPath = "/libsdl/ikvmcraft/assets/",
                 GameDirectoryPath = GameDirectoryPath,
                 MinecraftOsName = "Emscripten",
-				PlayerName = "ikvmcraft",
                 AsmTransformers =
                 [
 					InjectIkvmIntoKnotTransform.Transformer,
@@ -221,6 +218,12 @@ static partial class IkvmWasm
 						? new[] { DefuseRankedAuthTransform.Transformer }
 						: [],
 				],
+
+				PlayerName = playerName,
+				Uuid = uuid,
+				AccessToken = accessToken,
+				UserType = userType,
+				UserPropertiesJson = "{}"
             });
 
             return Task.CompletedTask;

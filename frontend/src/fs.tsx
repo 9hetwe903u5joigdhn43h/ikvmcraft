@@ -1,4 +1,17 @@
 import { css, FC } from "dreamland/core";
+import { Button, Icon } from "./ui/Button";
+import { Dialog } from "./ui/Dialog";
+import iconFolder from "@ktibow/iconset-material-symbols/folder";
+import iconDraft from "@ktibow/iconset-material-symbols/draft";
+import iconDownload from "@ktibow/iconset-material-symbols/download";
+import iconDelete from "@ktibow/iconset-material-symbols/delete";
+import iconClose from "@ktibow/iconset-material-symbols/close";
+import iconSave from "@ktibow/iconset-material-symbols/save";
+import iconUploadFile from "@ktibow/iconset-material-symbols/upload-file";
+import iconUploadFolder from "@ktibow/iconset-material-symbols/drive-folder-upload";
+import iconArchive from "@ktibow/iconset-material-symbols/archive";
+import iconUnarchive from "@ktibow/iconset-material-symbols/unarchive";
+import iconArrowBack from "@ktibow/iconset-material-symbols/arrow-back";
 
 import tar, { Headers as TarHeaders, Pack } from "tar-stream";
 import { opfsInvalidate } from "./opfs";
@@ -344,142 +357,195 @@ export function OpfsExplorer(
 		await uploadArchiveFiles(await Promise.all(handles.map((file) => file.getFile())));
 	};
 
-	const uploadDisabled = use(this.uploading).map((x) => x || PICKERS_UNAVAILABLE);
-	const downloadDisabled = use(this.downloading).map((x) => x || PICKERS_UNAVAILABLE);
+	const uploadDisabled = use(this.uploading).map(
+		(x) => x || PICKERS_UNAVAILABLE,
+	);
+	const downloadDisabled = use(this.downloading).map(
+		(x) => x || !window.showSaveFilePicker,
+	);
 
 	return (
-		<div class="fs-explorer" class:open={use(this.open)}>
-			<div class="bar">
-				{use(this.components).map((c) =>
-					c.length > 0 ? (
-						<button on:click={goUp} title="Up a level">
-							..
-						</button>
-					) : null
-				)}
-				<span class="cwd">
-					{use(this.components).map((c) => (c.length === 0 ? "/" : "/" + c.join("/")))}
-				</span>
-				<span class="spacer" />
-				<button disabled={uploadDisabled} on:click={uploadFile}>
-					Upload File
-				</button>
-				<button disabled={uploadDisabled} on:click={uploadFolder}>
-					Upload Folder
-				</button>
-				{archiveInput}
-				<button disabled={use(this.uploading)} on:click={uploadArchive} title="Extract a .tar/.tar.gz here">
-					Upload Archive
-				</button>
-				<button disabled={downloadDisabled} on:click={downloadArchive} title="Download this folder as a .tar/.tar.gz">
-					Download Archive
-				</button>
-				<button on:click={() => (this.open = false)}>Close</button>
-			</div>
+		<div class="fs-explorer">
+			<Dialog name="Files" open={use(this.open)}>
+				<div class="content">
+					<div class="bar">
+						{use(this.components).map((c) =>
+							c.length > 0 ? (
+								<Button on:click={goUp} icon="full" title="Up a level">
+									<Icon icon={iconArrowBack} />
+								</Button>
+							) : null,
+						)}
+						<span class="cwd">
+							{use(this.components).map((c) =>
+								c.length === 0 ? "Root Directory" : "/" + c.join("/"),
+							)}
+						</span>
+						<span class="spacer" />
+						<Button
+							disabled={uploadDisabled}
+							on:click={uploadFile}
+							icon="full"
+							title="Upload File"
+						>
+							<Icon icon={iconUploadFile} />
+						</Button>
+						<Button
+							disabled={uploadDisabled}
+							on:click={uploadFolder}
+							icon="full"
+							title="Upload Folder"
+						>
+							<Icon icon={iconUploadFolder} />
+						</Button>
+					</div>
 
-			{use(this.uploading).map((u) => (u ? <div class="status">Uploading files...</div> : null))}
-			{use(this.downloading).map((d) => (d ? <div class="status">Downloading archive...</div> : null))}
+					{use(this.uploading).map((u) =>
+						u ? <div class="status">Uploading files...</div> : null,
+					)}
+					{use(this.downloading).map((d) =>
+						d ? <div class="status">Downloading archive...</div> : null,
+					)}
 
-			<div class="entries">
-				{use(this.entries).map((entries) =>
-					entries.map((x) => {
-						const isDir = x.entry.kind === "directory";
+					<div class="entries">
+						{use(this.entries).map((entries) =>
+							entries.map((x) => {
+								const isDir = x.entry.kind === "directory";
 
-						const open = () => {
-							if (isDir) {
-								this.editing = null;
-								this.path = x.entry as FileSystemDirectoryHandle;
-							} else {
-								this.editing = x.entry as FileSystemFileHandle;
-							}
-						};
-						const download = async () => {
-							const blob = await (x.entry as FileSystemFileHandle).getFile();
-							const url = URL.createObjectURL(blob);
-							const a = document.createElement("a");
-							a.href = url;
-							a.download = x.name;
-							a.click();
-							await new Promise((r) => setTimeout(r, 100));
-							URL.revokeObjectURL(url);
-						};
-						const remove = async () => {
-							if (this.editing?.name === x.name) this.editing = null;
-							await this.path.removeEntry(x.name, { recursive: true });
-							this.path = this.path;
+								const open = () => {
+									if (isDir) {
+										this.editing = null;
+										this.path = x.entry as FileSystemDirectoryHandle;
+									} else {
+										this.editing = x.entry as FileSystemFileHandle;
+									}
+								};
+								const download = async () => {
+									const blob = await (
+										x.entry as FileSystemFileHandle
+									).getFile();
+									const url = URL.createObjectURL(blob);
+									const a = document.createElement("a");
+									a.href = url;
+									a.download = x.name;
+									a.click();
+									await new Promise((r) => setTimeout(r, 100));
+									URL.revokeObjectURL(url);
+								};
+								const remove = async () => {
+									if (this.editing?.name === x.name) this.editing = null;
+									await this.path.removeEntry(x.name, { recursive: true });
+									this.path = this.path;
+								};
+
+								return (
+									<div class="entry">
+										<Button
+											class="open"
+											type="listitem"
+											on:click={open}
+											title={x.name}
+										>
+											<Icon icon={isDir ? iconFolder : iconDraft} />
+											<span class="entry-name">{x.name}</span>
+										</Button>
+										{!isDir ? (
+											<Button
+												on:click={download}
+												icon="full"
+												type="listaction"
+												title="Download file"
+											>
+												<Icon icon={iconDownload} />
+											</Button>
+										) : null}
+										<Button
+											on:click={remove}
+											icon="full"
+											type="listaction"
+											title="Delete"
+										>
+											<Icon icon={iconDelete} />
+										</Button>
+									</div>
+								);
+							}),
+						)}
+					</div>
+
+					{use(this.editing).map((file) => {
+						if (!file) return null;
+
+						const area = (
+							<textarea aria-label={`Edit ${file.name}`} />
+						) as HTMLTextAreaElement;
+						area.value = "Loading file...";
+						file
+							.getFile()
+							.then((r) => r.text())
+							.then((r) => (area.value = r));
+
+						const save = async () => {
+							const writable = await file.createWritable();
+							await writable.write(area.value);
+							await writable.close();
+							this.editing = null;
 						};
 
 						return (
-							<div class="entry">
-								<button class="open" on:click={open}>
-									<span class="kind">{isDir ? "dir" : "file"}</span>
-									{x.name}
-								</button>
-								{!isDir ? (
-									<button on:click={download} title="Download file">
-										download
-									</button>
-								) : null}
-								<button on:click={remove} title="Delete">
-									delete
-								</button>
+							<div class="editor">
+								<div class="controls">
+									<span class="name">{file.name}</span>
+									<span class="spacer" />
+									<Button on:click={save} type="primary" icon="left">
+										<Icon icon={iconSave} /> Save
+									</Button>
+									<Button
+										on:click={() => (this.editing = null)}
+										icon="full"
+										title="Close editor"
+									>
+										<Icon icon={iconClose} />
+									</Button>
+								</div>
+								{area}
 							</div>
 						);
-					})
-				)}
-			</div>
-
-			{use(this.editing).map((file) => {
-				if (!file) return null;
-
-				const area = (<textarea />) as HTMLTextAreaElement;
-				area.value = "Loading file...";
-				file
-					.getFile()
-					.then((r) => r.text())
-					.then((r) => (area.value = r));
-
-				const save = async () => {
-					const writable = await file.createWritable();
-					await writable.write(area.value);
-					await writable.close();
-					this.editing = null;
-				};
-
-				return (
-					<div class="editor">
-						<div class="controls">
-							<span class="name">{file.name}</span>
-							<span class="spacer" />
-							<button on:click={save}>Save</button>
-							<button on:click={() => (this.editing = null)}>Close</button>
-						</div>
-						{area}
+					})}
+					<div class="spacer" />
+					<div class="archive">
+						{archiveInput}
+						<Button
+							disabled={use(this.uploading)}
+							on:click={uploadArchive}
+							icon="left"
+							title="Extract a .tar/.tar.gz here"
+						>
+							<Icon icon={iconUnarchive} /> Upload Folder Archive
+						</Button>
+						<Button
+							disabled={downloadDisabled}
+							on:click={downloadArchive}
+							icon="left"
+							title="Download this folder as a .tar/.tar.gz"
+						>
+							<Icon icon={iconArchive} /> Download Folder Archive
+						</Button>
 					</div>
-				);
-			})}
+				</div>
+			</Dialog>
 		</div>
 	);
 }
 OpfsExplorer.style = css`
 	:scope {
-		display: none;
-		position: fixed;
-		top: 0;
-		right: 0;
-		bottom: 0;
-		width: min(32rem, 100%);
-		flex-direction: column;
-		gap: 0.5rem;
-		padding: 0.75rem;
-		background: #fff;
-		border-left: 1px solid #000;
-		font-family: monospace;
-		overflow: auto;
-		z-index: 10;
+		display: contents;
 	}
-	:scope.open {
+	.content {
 		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		min-height: min(44rem, 90vh);
 	}
 
 	.bar {
@@ -489,7 +555,9 @@ OpfsExplorer.style = css`
 		flex-wrap: wrap;
 	}
 	.bar .cwd {
+		min-width: 0;
 		font-weight: bold;
+		font-family: var(--font-mono);
 		word-break: break-all;
 	}
 	.spacer {
@@ -503,7 +571,7 @@ OpfsExplorer.style = css`
 	.entries {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
+		gap: 0.5rem;
 		min-height: 0;
 	}
 	.entry {
@@ -511,17 +579,22 @@ OpfsExplorer.style = css`
 		align-items: center;
 		gap: 0.5rem;
 	}
-	.entry .open {
+	.entries .entry :global(.open) {
 		flex: 1;
+		min-width: 0;
+		gap: 0.5rem;
+		justify-content: flex-start;
 		text-align: left;
-		font-family: monospace;
+		font-family: var(--font-mono);
+	}
+	.entry :global(svg) {
+		width: 1.5rem;
+		height: 1.5rem;
+	}
+	.entry-name {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-	}
-	.entry .kind {
-		color: #888;
-		margin-right: 0.5rem;
 	}
 
 	.editor {
@@ -536,10 +609,25 @@ OpfsExplorer.style = css`
 	}
 	.editor .name {
 		font-weight: bold;
+		font-family: var(--font-mono);
 		word-break: break-all;
 	}
 	.editor textarea {
 		min-height: 16rem;
-		font-family: monospace;
+		font-family: var(--font-mono);
+		background: var(--bg-sub);
+		color: var(--fg);
+		border: 2px solid var(--surface4);
+		border-radius: 0.5rem;
+		padding: 0.5rem;
+		resize: vertical;
+	}
+	.archive {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+	}
+	.archive > :global(button) {
+		flex: 1;
 	}
 `;

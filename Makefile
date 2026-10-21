@@ -43,8 +43,6 @@ build: ikvmc-bundles
 	cp -r statics/ikvm/image frontend/public/
 	# dotnet messed up
 	sed -i 's/this.appendULeb(32768)/this.appendULeb(65535)/' frontend/public/_framework/dotnet.runtime.*.js
-	# emscripten sucks. Not with GL on the main thread (index.ts's WINK_GL_MAIN): wink draws to the canvas there.
-	sed -i 's/var offscreenCanvases \?= \?{};/var offscreenCanvases={};if(globalThis.window\&\&!window.TRANSFERRED_CANVAS\&\&!window.WINK_GL_MAIN){transferredCanvasNames=[".canvas"];window.TRANSFERRED_CANVAS=true;}/' frontend/public/_framework/dotnet.native.*.js
 
 serve: build
 	cd frontend && pnpm dev

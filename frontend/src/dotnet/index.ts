@@ -268,11 +268,22 @@ export async function initDotnet(canvas: HTMLCanvasElement) {
 	config = runtime.getConfig();
 	exports = await runtime.getAssemblyExports(config.mainAssemblyName!);
 
-	(runtime.Module as any).canvas = canvas;
+	let Module = runtime.Module as any;
+
+	Module.canvas = canvas;
+	Module.glfwOnWindowCreated = (window: any) => {
+		const initialFrame = Module._emscripten_glfw3_get_frame_count();
+		const timer = setInterval(() => {
+			if (Module._emscripten_glfw3_get_frame_count() <= initialFrame) return;
+
+			clearInterval(timer);
+			Module.glfwMakeCanvasResizable(window, ".canvas");
+		}, 50);
+	};
 
 	(globalThis as any).wasm = {
-		Module: runtime.Module,
-		FS: (runtime.Module as any).FS,
+		Module,
+		FS: Module.FS,
 		dotnet,
 		runtime,
 		config,
@@ -288,7 +299,7 @@ export async function initDotnet(canvas: HTMLCanvasElement) {
 		["org.lwjgl.util.Debug", "true"],
 		["org.lwjgl.util.DebugLoader", "true"],
 		["java.awt.headless", "true"],
-		["sodium.checks.issue2561", "false"]
+		["sodium.checks.issue2561", "false"],
 	];
 	// ?jprop.<name>=<value>: extra Java system properties, e.g. the jbox2d bench's schedule (bench.warmup /
 	// bench.batchSteps / bench.batches, read by IkvmBenchmarkStarter; scratchpad/wj/j2d/run.mjs --schedule).
@@ -306,11 +317,11 @@ export async function initDotnet(canvas: HTMLCanvasElement) {
 }
 
 export async function play(version: string) {
+	let mod = (globalThis as any).wasm.Module;
 	// O(1) counters (loader/Emscripten.c): native = malloc in use minus the GC's blocks, gc heap = those blocks
 	// (shown after the committed number below), heap = the sbrk break (what hits the 4 GiB; the wasm length grows
 	// ahead of it)
 	setInterval(() => {
-		let mod = (globalThis as any).wasm.Module;
 		dotnetState.wasmMemory = mod.wasmMemory.buffer.byteLength / (1024 * 1024);
 		dotnetState.nativeMemory = mod._ikvm_native_used_mb();
 		dotnetState.gcHeapMemory = mod._ikvm_gc_heap_mb();
@@ -343,7 +354,7 @@ export async function play(version: string) {
 		await exports.IkvmWasm.RunJar("/libsdl/bench.jar");
 	} else {
 		console.debug("Run...");
-		await exports.IkvmWasm.Run(version);
+		await exports.IkvmWasm.Run(version, "ikvmcraft", "", "0", "legacy");
 	}
 	console.debug("Exited");
 }

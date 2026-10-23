@@ -21,7 +21,7 @@ internal static class CallerSensitiveLoggerFix
 	{
 		// Cheap reject: only pay for an ASM round-trip when the class actually references one of the
 		// caller-sensitive factories (their internal names land in the constant pool verbatim as ASCII UTF-8).
-		if (!ContainsAscii(bytes, LogManager) && !ContainsAscii(bytes, LogUtils))
+		if (!ContainsAscii(bytes, LogManagerAscii) && !ContainsAscii(bytes, LogUtilsAscii))
 			return bytes;
 
 		var reader = new ClassReader(bytes);
@@ -78,19 +78,13 @@ internal static class CallerSensitiveLoggerFix
 		}
 	}
 
-	private static bool ContainsAscii(byte[] haystack, string needle)
+	// Every class through IkvmClassLoader is scanned twice, so this uses corlib's vectorized span search (AOT'd)
+	// rather than a byte loop in this JIT'd assembly: 0.23 s of the client before 26.2's first frame (R514).
+	private static readonly byte[] LogManagerAscii = System.Text.Encoding.ASCII.GetBytes(LogManager);
+	private static readonly byte[] LogUtilsAscii = System.Text.Encoding.ASCII.GetBytes(LogUtils);
+
+	private static bool ContainsAscii(byte[] haystack, byte[] needle)
 	{
-		int n = needle.Length;
-		if (n == 0 || haystack.Length < n)
-			return false;
-		for (int i = 0; i <= haystack.Length - n; i++)
-		{
-			int j = 0;
-			while (j < n && haystack[i + j] == (byte)needle[j])
-				j++;
-			if (j == n)
-				return true;
-		}
-		return false;
+		return System.MemoryExtensions.IndexOf(new System.ReadOnlySpan<byte>(haystack), new System.ReadOnlySpan<byte>(needle)) >= 0;
 	}
 }

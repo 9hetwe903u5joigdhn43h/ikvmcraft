@@ -191,7 +191,7 @@ export async function initDotnet(canvas: HTMLCanvasElement) {
 		.withEnvironmentVariable("MONO_SLEEP_ABORT_LIMIT", "20000")
 		.withEnvironmentVariable(
 			"MONO_GC_PARAMS",
-			"nursery-size=64m,tlab-size=64k,max-heap-size=2560m,default-allowance-ratio=2.0"
+			"nursery-size=64m,tlab-size=64k,max-heap-size=2560m,default-allowance-ratio=2.0,major=marksweep-conc-par,minor=simple-par"
 		)
 		//.withEnvironmentVariable("MONO_GC_DEBUG", "binary-protocol=/gcproto:64m")
 		//.withEnvironmentVariable("MONO_GC_DEBUG", "print-pinning,print-gchandles")

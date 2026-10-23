@@ -1,4 +1,4 @@
-import { ComponentInstance, css, Delegate, FC } from "dreamland/core";
+import { ComponentInstance, css, FC } from "dreamland/core";
 import "./style.css";
 import { initDotnet, play, dotnetState } from "./dotnet";
 import { loglisteners } from "./dotnet/log";
@@ -292,9 +292,12 @@ function Launcher(
 			fabric: string;
 			play: () => void;
 		},
-		{}
+		{
+			fsOpen: boolean;
+		}
 	>
 ) {
+	this.fsOpen = false;
 	let ver = this.version,
 		fab = this.fabric;
 	return (
@@ -310,11 +313,22 @@ function Launcher(
 					<span>Fabric Loader version: </span>
 					<TextField value={use(this.fabric)} placeholder={fab} />
 				</div>
-				<Button type="primary" icon="left" on:click={() => this.play()}>
-					<Icon icon={iconPlayArrow} />
-					Play
-				</Button>
+				<div class="options">
+					<Button type="primary" icon="left" class="play" on:click={() => this.play()}>
+						<Icon icon={iconPlayArrow} />
+						Play
+					</Button>
+					<Button
+						type="normal"
+						icon="left"
+						on:click={() => (this.fsOpen = !this.fsOpen)}
+					>
+						<Icon icon={iconFolderOpen} />
+						Files
+					</Button>
+				</div>
 			</div>
+			<OpfsExplorer open={use(this.fsOpen)} />
 		</div>
 	);
 }
@@ -331,6 +345,15 @@ Launcher.style = css`
 		display: flex;
 		flex-direction: column;
 		gap: 0.5rem;
+	}
+
+	.options {
+		display: flex;
+		flex-direction: row;
+		gap: 0.5rem;
+	}
+	.options :global(.play) {
+		flex: 1;
 	}
 `;
 

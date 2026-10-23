@@ -232,14 +232,14 @@ internal sealed class IkvmClassLoader : java.net.URLClassLoader, ikvm.lang.LinkT
 
 	public override java.net.URL getResource(string name)
 	{
-		if (!name.EndsWith(".class"))
+		if (!name.EndsWith(".class", StringComparison.Ordinal))
 			return base.getResource(name);
 
 		var klass = name[0..^6].Replace("/", ".");
 
 		foreach (var (assemblyName, prefixes, _) in dllLoaders)
 		{
-			if (!prefixes.Any(x => klass.StartsWith(x)))
+			if (!prefixes.Any(x => klass.StartsWith(x, StringComparison.Ordinal)))
 				continue;
 
 			classloader_debug($"[IkvmClassLoader] '{name}' resource loaded from asm {assemblyName}");
@@ -251,13 +251,13 @@ internal sealed class IkvmClassLoader : java.net.URLClassLoader, ikvm.lang.LinkT
 
 	public override java.util.Enumeration getResources(string name)
 	{
-		if (name.EndsWith(".class"))
+		if (name.EndsWith(".class", StringComparison.Ordinal))
 		{
 			var klass = name[0..^6].Replace("/", ".");
 
 			foreach (var (assemblyName, prefixes, _) in dllLoaders)
 			{
-				if (!prefixes.Any(x => klass.StartsWith(x)))
+				if (!prefixes.Any(x => klass.StartsWith(x, StringComparison.Ordinal)))
 					continue;
 
 				classloader_debug($"[IkvmClassLoader] '{name}' resources resolved from asm {assemblyName}");
@@ -315,7 +315,7 @@ internal sealed class IkvmClassLoader : java.net.URLClassLoader, ikvm.lang.LinkT
 			{
 				foreach (var (assemblyName, prefixes, loader) in dllLoaders)
 				{
-					if (!prefixes.Any(x => name.StartsWith(x)))
+					if (!prefixes.Any(x => name.StartsWith(x, StringComparison.Ordinal)))
 						continue;
 
 					loadedFrom = $"assembly {assemblyName}";

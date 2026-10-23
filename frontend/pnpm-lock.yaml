@@ -11,6 +11,9 @@ importers:
       '@ktibow/iconset-material-symbols':
         specifier: 0.0.1747426012
         version: 0.0.1747426012
+      '@mercuryworkshop/epoxy-tls':
+        specifier: 3.0.0-alpha.5
+        version: 3.0.0-alpha.5
       dreamland:
         specifier: github:mercuryworkshop/dreamlandjs
         version: https://codeload.github.com/mercuryworkshop/dreamlandjs/tar.gz/9dfb8bc19b186d955d8fed4cee4aa4a19197d778
@@ -207,8 +210,14 @@ packages:
   '@iconify/types@2.0.0':
     resolution: {integrity: sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg==}
 
+  '@jridgewell/sourcemap-codec@1.6.0':
+    resolution: {integrity: sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==}
+
   '@ktibow/iconset-material-symbols@0.0.1747426012':
     resolution: {integrity: sha512-lLiDCN8lSwzZvva+kF5J+q8MkVGpXfPlEc7IB/VSCTWv8rGt1XShE64gqwCgS4v0kk4tG7k6U90+EZwENZZ4vQ==}
+
+  '@mercuryworkshop/epoxy-tls@3.0.0-alpha.5':
+    resolution: {integrity: sha512-VWb+ATp9Vk/u5lZ/fYRGaDQe/WelMjSoL77magABAJiBqujjbIJHp+dCwB4sk/yIeM1cR1WudP1rQcCa3633CQ==}
 
   '@mercuryworkshop/wisp-js@0.5.0':
     resolution: {integrity: sha512-YIPnONZdMYRXLdttL/zQM2PwjHQw3LfNPWTP54Lqhehs79lcORY8rwv5j7bGnuz9S31rZIh1OEzldubE9dtnoA==}
@@ -572,6 +581,9 @@ packages:
   magic-string@0.25.9:
     resolution: {integrity: sha512-RmF0AsMzgt25qzqqLc1+MbHmhdx0ojF2Fvs4XnOqz2ZOBXzzkEwc/dJQZCYHAn7v1jbVOjAZfK8msRn4BxO4VQ==}
 
+  magic-string@0.30.21:
+    resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
+
   nanoid@3.3.11:
     resolution: {integrity: sha512-N8SpfPUnUp1bK+PMYW8qSWdl9U+wwNWI4QKxOYDy9JAro3WMX7p2OeVRF9v+347pnakNevPmiHhNmZ2HbFA76w==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
@@ -779,9 +791,15 @@ snapshots:
 
   '@iconify/types@2.0.0': {}
 
+  '@jridgewell/sourcemap-codec@1.6.0': {}
+
   '@ktibow/iconset-material-symbols@0.0.1747426012':
     dependencies:
       '@iconify/types': 2.0.0
+
+  '@mercuryworkshop/epoxy-tls@3.0.0-alpha.5':
+    dependencies:
+      magic-string: 0.30.21
 
   '@mercuryworkshop/wisp-js@0.5.0':
     dependencies:
@@ -1065,6 +1083,10 @@ snapshots:
   magic-string@0.25.9:
     dependencies:
       sourcemap-codec: 1.4.8
+
+  magic-string@0.30.21:
+    dependencies:
+      '@jridgewell/sourcemap-codec': 1.6.0
 
   nanoid@3.3.11: {}
 

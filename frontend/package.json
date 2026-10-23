@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@ktibow/iconset-material-symbols": "0.0.1747426012",
+    "@mercuryworkshop/epoxy-tls": "3.0.0-alpha.5",
     "dreamland": "github:mercuryworkshop/dreamlandjs",
     "events": "^3.3.0",
     "streamx-webstream": "^1.2.12",

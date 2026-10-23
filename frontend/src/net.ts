@@ -1,6 +1,6 @@
 import { console_log } from "./dotnet/log";
-import { init, EpoxyClient, WebSocketJsProvider, WispSocketProvider } from "./epoxy";
-import wasm from "./epoxy/epoxy.wasm?url";
+import { init, EpoxyClient, WebSocketJsProvider, WispSocketProvider } from "@mercuryworkshop/epoxy-tls/full";
+import wasm from "@mercuryworkshop/epoxy-tls/full/wasm?url";
 
 let client: EpoxyClient;
 

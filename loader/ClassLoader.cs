@@ -181,8 +181,6 @@ internal sealed class IkvmClassLoader : java.net.URLClassLoader, ikvm.lang.LinkT
 			}
 		}
 
-		bytes = CallerSensitiveLoggerFix.Apply(bytes);
-
 		return bytes;
 	}
 

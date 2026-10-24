@@ -2,7 +2,7 @@ import { console_log } from "./dotnet/log";
 import { init, EpoxyClient, WebSocketJsProvider, WispSocketProvider } from "@mercuryworkshop/epoxy-tls/full";
 import wasm from "@mercuryworkshop/epoxy-tls/full/wasm?url";
 
-let client: EpoxyClient;
+export let client: EpoxyClient;
 
 await init({ module_or_path: wasm });
 
@@ -30,6 +30,20 @@ createClient();
 interface Stream {
     read: ReadableStream<Uint8Array<ArrayBuffer>>;
     write: WritableStream<Uint8Array<ArrayBuffer>>;
+}
+
+// A wisp-tls stream starts with the certificate chain epoxy verified, for the Java side's SSLSession (EpoxySslSocket in
+// loader/IkvmNetwork.cs): a big-endian u32 length, then the certificates' DER back to back, leaf first.
+function certificateChainHeader(certs: Uint8Array[]): Uint8Array<ArrayBuffer> {
+	const len = certs.reduce((n, cert) => n + cert.byteLength, 0);
+	const out = new Uint8Array(4 + len);
+	new DataView(out.buffer).setUint32(0, len);
+	let at = 4;
+	for (const cert of certs) {
+		out.set(cert, at);
+		at += cert.byteLength;
+	}
+	return out;
 }
 
 const WebSocketFields = {
@@ -118,11 +132,14 @@ export class EpxTcpWs extends EventTarget {
 
 		(async () => {
 			let ws: Stream = null!;
+			let header: Uint8Array<ArrayBuffer> | null = null;
 			try {
 				if (type === "tcp") {
 					ws = await client.connect(host, port) as Stream;
 				} else if (type === "tls") {
-					ws = await client.connectTls(host, port) as Stream;
+					const tls = await client.connectTls(host, port);
+					header = certificateChainHeader(tls.peerCertificates);
+					ws = tls as Stream;
 				} else {
 					throw new Error("invalid ty " + type);
 				}
@@ -147,6 +164,7 @@ export class EpxTcpWs extends EventTarget {
 
 			this.readyState = WebSocketFields.OPEN;
 			onopen();
+			if (header) onmessage(header);
 			let errored = false;
 			while (true) {
 				try {

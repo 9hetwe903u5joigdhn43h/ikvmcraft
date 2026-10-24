@@ -3,7 +3,6 @@ using System.IO;
 using System.Linq;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.JavaScript;
 
 struct Dll
@@ -149,6 +148,7 @@ static partial class IkvmWasm
             java.lang.System.setProperty(prop[0], prop[1]);
         }
 
+        IkvmNetworkInterfaces.Install();
         IkvmNameService.Install();
         IkvmSocketService.Install();
     }
@@ -204,8 +204,6 @@ static partial class IkvmWasm
 					SwapNettyBackendTransform.Transformer,
 
 					ThereAreNoBareClientsTransform.Transformer,
-
-					FixCrashReportTransform.Transformer,
 
 					LazyDfuTransform.Transformer,
 

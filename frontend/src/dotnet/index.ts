@@ -9,6 +9,13 @@ let runtime: RuntimeAPI;
 let config: MonoConfig;
 let exports: any;
 
+export interface MinecraftAuthInfo {
+	playerName: string;
+	uuid: string;
+	accessToken: string;
+	userType: string;
+}
+
 export let dotnetState = createState({
 	wasmMemory: 0,
 	gcMemory: 0,
@@ -316,7 +323,7 @@ export async function initDotnet(canvas: HTMLCanvasElement) {
 	console.timeEnd("dotnet ");
 }
 
-export async function play(version: string) {
+export async function play(version: string, authInfo: MinecraftAuthInfo) {
 	let mod = (globalThis as any).wasm.Module;
 	// O(1) counters (loader/Emscripten.c): native = malloc in use minus the GC's blocks, gc heap = those blocks
 	// (shown after the committed number below), heap = the sbrk break (what hits the 4 GiB; the wasm length grows
@@ -354,7 +361,7 @@ export async function play(version: string) {
 		await exports.IkvmWasm.RunJar("/libsdl/bench.jar");
 	} else {
 		console.debug("Run...");
-		await exports.IkvmWasm.Run(version, "ikvmcraft", "", "0", "legacy");
+		await exports.IkvmWasm.Run(version, authInfo.playerName, authInfo.uuid, authInfo.accessToken, authInfo.userType);
 	}
 	console.debug("Exited");
 }

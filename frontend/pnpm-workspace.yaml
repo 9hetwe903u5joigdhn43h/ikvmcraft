@@ -1,13 +1,4 @@
-onlyBuiltDependencies:
-  - "dreamland"
-
 allowBuilds:
-  # optional native accelerator for ws (wisp-js); ws falls back to plain JS without it
   bufferutil: false
-  dreamland: true
-  # pnpm now keys git-hosted packages by their tarball URL; same intent as the line above.
-  dreamland@https://codeload.github.com/mercuryworkshop/dreamlandjs/tar.gz/9dfb8bc19b186d955d8fed4cee4aa4a19197d778: true
-  esbuild: true
-
-minimumReleaseAgeExclude:
-  - "@mercuryworkshop/epoxy-tls@3.0.0-alpha.5"
+  dreamland@https://codeload.github.com/mercuryworkshop/dreamlandjs/tar.gz/7b0b82997a25c9432695f3e0e28d7fbbbe3bed4a: true
+  esbuild: false

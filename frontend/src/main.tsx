@@ -1,6 +1,6 @@
-import { ComponentInstance, css, FC } from "dreamland/core";
+import { ComponentInstance, css, FC, Stateful } from "dreamland/core";
 import "./style.css";
-import { initDotnet, play, dotnetState } from "./dotnet";
+import { initDotnet, play, dotnetState, MinecraftAuthInfo } from "./dotnet";
 import { loglisteners } from "./dotnet/log";
 import { dumpWasmJit } from "./dotnet/jitbench";
 import {
@@ -10,10 +10,19 @@ import {
 import { OpfsExplorer } from "./fs";
 import { Button, Icon } from "./ui/Button";
 import { TextField } from "./ui/TextField";
+import { createStore } from "dreamland/util";
+import {
+	getProfile,
+	minecraftAuth,
+	refreshToken,
+	startDeviceCodeAuth,
+	Token,
+} from "./auth";
 import iconDns from "@ktibow/iconset-material-symbols/dns-outline";
 import iconCode from "@ktibow/iconset-material-symbols/code";
 import iconFolderOpen from "@ktibow/iconset-material-symbols/folder-open";
 import iconPlayArrow from "@ktibow/iconset-material-symbols/play-arrow";
+import iconLogin from "@ktibow/iconset-material-symbols/login";
 
 function LogView(this: FC<{ scrolling: boolean }>) {
 	const create = (color: string, log: string) => {
@@ -81,6 +90,7 @@ function Runner(
 		{
 			version: string;
 			fabric: string;
+			auth: MinecraftAuthInfo,
 		},
 		{
 			canvas: HTMLCanvasElement;
@@ -120,7 +130,7 @@ function Runner(
 
 		this.loadState = "";
 
-		await play(`${version}-fabric-${fabric}`);
+		await play(`${version}-fabric-${fabric}`, this.auth);
 	};
 
 	let toFixed = (x: number) => x.toFixed(0);
@@ -285,25 +295,136 @@ Runner.style = css`
 	}
 `;
 
+let authStore: Stateful<{
+	token: Token | undefined;
+}> = createStore(
+	{
+		token: undefined,
+	},
+	{ ident: "ikvmcraft-auth-1", autosave: "auto", backing: "localstorage" }
+);
+
+type AuthState =
+	| { type: "loading" }
+	| { type: "ready" }
+	| { type: "authing"; url: string; qr: string }
+	| {
+			type: "done";
+			name: string;
+			uuid: string;
+			token: string;
+	  }
+	| { type: "error"; error: any };
+
 function Launcher(
 	this: FC<
 		{
 			version: string;
 			fabric: string;
-			play: () => void;
+			play: (info: MinecraftAuthInfo) => void;
 		},
 		{
 			fsOpen: boolean;
+			authState: AuthState;
 		}
 	>
 ) {
-	this.fsOpen = false;
 	let ver = this.version,
 		fab = this.fabric;
+
+	this.fsOpen = false;
+	this.authState = { type: "loading" } as AuthState;
+
+	let readyToPlay = use(this.authState).map(x => import.meta.env.DEV || x.type === "done");
+
+	let populateToken = async (token: Token) => {
+		try {
+			let mc = await minecraftAuth(token.access);
+			let info = await getProfile(mc);
+
+			this.authState = {
+				type: "done",
+				name: info.name,
+				uuid: info.id,
+				token: mc,
+			};
+		} catch (err) {
+			this.authState = { type: "error", error: err };
+		}
+	};
+
+	this.cx.mount = async () => {
+		let token: Token | undefined;
+		if (!(token = authStore.token)) {
+			this.authState = { type: "ready" };
+			return;
+		}
+
+		if (token.expires < Date.now()) {
+			try {
+				authStore.token = token = await refreshToken(token.refresh);
+			} catch (e) {
+				this.authState = { type: "error", error: e };
+			}
+		}
+
+		await populateToken(token);
+	};
+
+	let auth = async () => {
+		try {
+			let deviceCodeAuth = await startDeviceCodeAuth();
+			this.authState = {
+				type: "authing",
+				url: deviceCodeAuth.link_url,
+				qr: deviceCodeAuth.qr_svg_uri,
+			};
+
+			let token = await deviceCodeAuth.token;
+			authStore.token = token;
+			await populateToken(token);
+		} catch (err) {
+			this.authState = { type: "error", error: err };
+		}
+	};
+
+	let authInfo = (): MinecraftAuthInfo => {
+		if (this.authState.type === "done") {
+			return { playerName: this.authState.name, uuid: this.authState.uuid, accessToken: this.authState.token, userType: "msa" }
+		}
+		if (import.meta.env.DEV) {
+			return { playerName: "ikvmcraft", uuid: "", accessToken: "0", userType: "legacy" };
+		}
+		throw new Error("no auth");
+	}
+
 	return (
 		<div>
 			<Logo />
 			<p>This is a web port.</p>
+			<h2>Authentication</h2>
+			<div class="auth">
+				{use(this.authState).map((x) => {
+					if (x.type === "loading") return <span>Loading auth state...</span>;
+					else if (x.type === "ready")
+						return (
+							<Button type="primary" icon="left" on:click={auth}>
+								<Icon icon={iconLogin} />
+								Log In
+							</Button>
+						);
+					else if (x.type === "done") return <span>Logged in as {x.name}</span>;
+					else if (x.type === "authing")
+						return (
+							<div>
+								<div>Log in at <a href={x.url} target="_blank">{x.url}</a></div>
+								<img class="qr" src={x.qr} />
+							</div>
+						);
+					else if (x.type === "error") return <span>Error: {x.error}</span>;
+				})}
+			</div>
+			<h2>Play</h2>
 			<div class="settings">
 				<div>
 					<span>Minecraft version: </span>
@@ -314,7 +435,13 @@ function Launcher(
 					<TextField value={use(this.fabric)} placeholder={fab} />
 				</div>
 				<div class="options">
-					<Button type="primary" icon="left" class="play" on:click={() => this.play()}>
+					<Button
+						type="primary"
+						icon="left"
+						class="play"
+						disabled={readyToPlay.not()}
+						on:click={() => this.play(authInfo())}
+					>
 						<Icon icon={iconPlayArrow} />
 						Play
 					</Button>
@@ -355,6 +482,13 @@ Launcher.style = css`
 	.options :global(.play) {
 		flex: 1;
 	}
+
+	.auth .qr {
+		width: 16rem;
+		height: 16rem;
+		padding: 1rem;
+		background: white;
+	}
 `;
 
 function App(
@@ -370,9 +504,9 @@ function App(
 	this.version = "26.2";
 	this.fabric = "0.19.5";
 
-	let play = async () => {
+	let play = async (info: MinecraftAuthInfo) => {
 		this.runner = (
-			<Runner version={this.version} fabric={this.fabric} />
+			<Runner version={this.version} fabric={this.fabric} auth={info} />
 		) as ComponentInstance<typeof Runner>;
 	};
 

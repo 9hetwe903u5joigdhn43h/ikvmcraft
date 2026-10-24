@@ -11,18 +11,19 @@
   "devDependencies": {
     "@iconify/types": "2.0.0",
     "@mercuryworkshop/wisp-js": "^0.5.0",
-    "@types/tar-stream": "^3.1.4",
-    "@vitejs/plugin-basic-ssl": "^2.1.4",
+    "@types/tar-stream": "=3.1.4",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
     "rollup-plugin-node-polyfills": "^0.2.1",
     "typescript": "~5.9.3",
-    "vite": "^7.2.4"
+    "vite": "^7.3.7"
   },
   "dependencies": {
     "@ktibow/iconset-material-symbols": "0.0.1747426012",
     "@mercuryworkshop/epoxy-tls": "3.0.0-alpha.5",
     "dreamland": "github:mercuryworkshop/dreamlandjs",
     "events": "^3.3.0",
+    "qr": "^0.7.2",
     "streamx-webstream": "^1.2.12",
-    "tar-stream": "^3.2.0"
+    "tar-stream": "=3.2.0"
   }
 }

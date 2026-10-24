@@ -187,19 +187,6 @@ public sealed class WebSocketStream : Stream
 		}
 	}
 
-	/// <summary>
-	/// Tears the socket down immediately with no close handshake. Unlike <see cref="Close"/> this
-	/// never blocks, so it's safe to call from a netty event-loop thread (see IkvmWebSocketChannel).
-	/// </summary>
-	public void Abort()
-	{
-		try { _socket.Abort(); } catch { /* ignore */ }
-		if (_ownsSocket)
-		{
-			try { _socket.Dispose(); } catch { /* ignore */ }
-		}
-	}
-
 	protected override void Dispose(bool disposing)
 	{
 		if (disposing)
@@ -261,6 +248,7 @@ static class IkvmNetworkState
 	}
 	private static int GetIndexFromIP((byte, byte, byte, byte) ip)
 	{
+		if (ip.Item1 != 240 || ip.Item2 != 67) throw new ArgumentOutOfRangeException("not a fake ip");
 		return ip.Item3 * byte.MaxValue + ip.Item4;
 	}
 
@@ -314,9 +302,15 @@ static class IkvmNetworkState
 // already chosen when its resolver field is set, before the first lookup.
 public class IkvmNameService : java.net.spi.InetAddressResolver
 {
+	// The machine's own name (gethostname), which InetAddress.getLocalHost() resolves through us.
+	private static string LocalHostName;
+
 	public static void Install()
 	{
 		_ = InetAddress.getByAddress([240, 0, 0, 0]);
+
+		var impl = typeof(InetAddress).GetField("impl", BindingFlags.Static | BindingFlags.NonPublic).GetValue(null);
+		LocalHostName = (string)impl.GetType().GetMethod("getLocalHostName").Invoke(impl, null);
 
 		var field = typeof(InetAddress).GetField("resolver", BindingFlags.Static | BindingFlags.NonPublic);
 		field.SetValue(null, new IkvmNameService());
@@ -324,8 +318,39 @@ public class IkvmNameService : java.net.spi.InetAddressResolver
 
 	public java.util.stream.Stream lookupByName(string host, java.net.spi.InetAddressResolver.LookupPolicy lookupPolicy)
 	{
+		if (host.Equals(LocalHostName, StringComparison.OrdinalIgnoreCase))
+			return java.util.Arrays.stream(LocalHostAddresses(host));
+
 		var (a, b, c, d) = IkvmNetworkState.GetFakeIP(host);
 		return java.util.Arrays.stream(new object[] { InetAddress.getByAddress([a, b, c, d]) });
+	}
+
+	// The local host is the machine's interfaces (libnet's synthetic eth0, see IkvmNetworkInterfaces), not a fake IP:
+	// that would be numbered by what happened to be resolved first, and differ from one launch to the next.
+	private static object[] LocalHostAddresses(string host)
+	{
+		var addrs = new List<object>();
+		try
+		{
+			var nifs = NetworkInterface.getNetworkInterfaces();
+			while (nifs.hasMoreElements())
+			{
+				var nif = (NetworkInterface)nifs.nextElement();
+				if (nif.isLoopback() || !nif.isUp())
+					continue;
+				var inets = nif.getInetAddresses();
+				while (inets.hasMoreElements())
+					addrs.Add(InetAddress.getByAddress(host, ((InetAddress)inets.nextElement()).getAddress()));
+			}
+		}
+		catch (SocketException e)
+		{
+			Console.WriteLine($"[IkvmNameService] no network interfaces for the local host: {e.getMessage()}");
+		}
+
+		if (addrs.Count == 0)
+			addrs.Add(InetAddress.getByAddress(host, InetAddress.getLoopbackAddress().getAddress()));
+		return addrs.ToArray();
 	}
 
 	public string lookupByAddress(byte[] addr)
@@ -343,11 +368,35 @@ public class IkvmNameService : java.net.spi.InetAddressResolver
 	}
 }
 
+// IKVM's libnet reports a synthetic eth0 under emscripten and reads its MAC from sysfs, as Linux does
+// (emscripten-stubs/ikvm_netif.h in ikvm-wasm-build). Make one up per install and keep it in OPFS, so the hardware
+// address -- and the hardware IDs mods derive from it -- is stable across launches but still differs between installs.
+public static class IkvmNetworkInterfaces
+{
+	private const string PersistedAddressPath = "/libsdl/ikvmcraft/eth0-address";
+	private const string SysfsAddressPath = "/sys/class/net/eth0/address";
+
+	public static void Install()
+	{
+		if (!File.Exists(PersistedAddressPath))
+		{
+			var mac = System.Security.Cryptography.RandomNumberGenerator.GetBytes(6);
+			mac[0] = (byte)((mac[0] & 0xfc) | 0x02); // unicast, locally administered
+			Directory.CreateDirectory(Path.GetDirectoryName(PersistedAddressPath));
+			File.WriteAllText(PersistedAddressPath, BitConverter.ToString(mac).Replace('-', ':').ToLowerInvariant() + "\n");
+		}
+
+		Directory.CreateDirectory(Path.GetDirectoryName(SysfsAddressPath));
+		File.Copy(PersistedAddressPath, SysfsAddressPath, overwrite: true);
+	}
+}
+
 public static class IkvmSocketService
 {
 	public static void Install()
 	{
 		Socket.setSocketImplFactory(new EpoxySocketImplFactory());
+		DatagramSocket.setDatagramSocketImplFactory(new NoDatagramSocketImplFactory());
 		Security.insertProviderAt(new EpoxyProvider(), 1);
 		HttpsURLConnection.setDefaultSSLSocketFactory(new EpoxySslSocketFactory());
 		HttpsURLConnection.setDefaultHostnameVerifier(new AllowAllHostnameVerifier());
@@ -512,6 +561,39 @@ public static class IkvmSocketService
 		protected override void accept(SocketImpl s) => throw new NotImplementedException("no servers");
 	}
 
+	// The wisp proxy carries TCP streams only, so there is no UDP. Left to the JDK, a DatagramSocket is a DatagramChannel,
+	// whose dispatcher cannot even initialize under emscripten (socketpair fails): creating one threw NoClassDefFoundError,
+	// an Error that callers' catch (Exception) lets through -- Minecraft's LAN server detection took the multiplayer
+	// screen down with it. Fail creation with the SocketException they handle instead.
+	private class NoDatagramSocketImplFactory : DatagramSocketImplFactory
+	{
+		public DatagramSocketImpl createDatagramSocketImpl() => new NoDatagramSocketImpl();
+	}
+
+	private class NoDatagramSocketImpl : DatagramSocketImpl
+	{
+		private static SocketException Unsupported() => new("UDP is not supported: the wisp proxy only carries TCP");
+
+		protected override void create() => throw Unsupported();
+		protected override void close() { } // DatagramSocket closes the delegate whose creation failed
+
+		protected override void bind(int lport, InetAddress laddr) => throw Unsupported();
+		protected override void send(DatagramPacket p) => throw Unsupported();
+		protected override int peek(InetAddress i) => throw Unsupported();
+		protected override int peekData(DatagramPacket p) => throw Unsupported();
+		protected override void receive(DatagramPacket p) => throw Unsupported();
+		[Obsolete] protected override void setTTL(byte ttl) => throw Unsupported();
+		[Obsolete] protected override byte getTTL() => throw Unsupported();
+		protected override void setTimeToLive(int ttl) => throw Unsupported();
+		protected override int getTimeToLive() => throw Unsupported();
+		protected override void join(InetAddress inetaddr) => throw Unsupported();
+		protected override void leave(InetAddress inetaddr) => throw Unsupported();
+		protected override void joinGroup(SocketAddress mcastaddr, NetworkInterface netIf) => throw Unsupported();
+		protected override void leaveGroup(SocketAddress mcastaddr, NetworkInterface netIf) => throw Unsupported();
+		public override void setOption(int optID, object value) => throw Unsupported();
+		public override object getOption(int optID) => throw Unsupported();
+	}
+
 	private class EpoxySslSocketFactory : SSLSocketFactory
 	{
 		public override Socket createSocket(InetAddress host, int port) => new EpoxySslSocket(host, port);
@@ -529,7 +611,8 @@ public static class IkvmSocketService
 		public override string[] getSupportedCipherSuites() => getDefaultCipherSuites();
 	}
 
-	private class EpoxySslSession(string host, int port) : SSLSession
+	// peerCertificates is the chain epoxy verified the server with, leaf first.
+	private class EpoxySslSession(string host, int port, Certificate[] peerCertificates) : SSLSession
 	{
 		private readonly byte[] id = Guid.NewGuid().ToByteArray();
 		private readonly long created = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -556,9 +639,14 @@ public static class IkvmSocketService
 		public void invalidate() { }
 
 		public SSLSessionContext getSessionContext() => null;
-		public Certificate[] getPeerCertificates() => throw new SSLPeerUnverifiedException("Certificate chain unavailable.");
+		// HostnameVerifiers (okhttp's, HttpsURLConnection's) check the host against these
+		public Certificate[] getPeerCertificates() => peerCertificates.Length > 0
+			? (Certificate[])peerCertificates.Clone()
+			: throw new SSLPeerUnverifiedException("Certificate chain unavailable.");
 		public X509Certificate[] getPeerCertificateChain() => throw new SSLPeerUnverifiedException("Certificate chain unavailable.");
-		public Principal getPeerPrincipal() => throw new SSLPeerUnverifiedException("Peer principal unavailable.");
+		public Principal getPeerPrincipal() => peerCertificates.Length > 0
+			? ((java.security.cert.X509Certificate)peerCertificates[0]).getSubjectX500Principal()
+			: throw new SSLPeerUnverifiedException("Peer principal unavailable.");
 		public Certificate[] getLocalCertificates() => null;
 		public Principal getLocalPrincipal() => null;
 	}
@@ -576,7 +664,22 @@ public static class IkvmSocketService
 			socket.ConnectAsync(new($"ws://wisp-tls/{host}:{port}"), new()).Wait();
 
 			Socket = new(socket);
-			Session = new(host, port);
+			Session = new(host, port, ReadPeerCertificates(Socket));
+		}
+
+		// A wisp-tls stream starts with the certificate chain epoxy verified (EpxTcpWs in frontend/src/net.ts): a
+		// big-endian length, then the certificates' DER back to back, which is what generateCertificates reads.
+		private static Certificate[] ReadPeerCertificates(WebSocketStream stream)
+		{
+			var header = new byte[4];
+			stream.ReadExactly(header, 0, header.Length);
+			var chain = new byte[System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header)];
+			if (chain.Length == 0)
+				return [];
+			stream.ReadExactly(chain, 0, chain.Length);
+
+			var certs = CertificateFactory.getInstance("X.509").generateCertificates(new java.io.ByteArrayInputStream(chain));
+			return (Certificate[])certs.toArray(new Certificate[0]);
 		}
 
 		internal EpoxySslSocket(InetAddress host, int port) => Connect(host, port);
@@ -621,159 +724,82 @@ public static class IkvmSocketService
 	}
 }
 
-internal sealed class ActionRunnable : java.lang.Runnable
+// The game connection's WebSocket, for its netty channel: ikvmcraft.IkvmWebSocketChannel (loader/java), which is Java
+// so that it links against whichever netty the game ships. So nothing here may touch netty: the channel talks to this
+// in JDK types only. The callbacks run on whatever thread finished the I/O; the channel hops onto its event loop.
+public sealed class IkvmWebSocketConnection
 {
-	private readonly Action Body;
-	internal ActionRunnable(Action body) => Body = body;
-	public void run() => Body();
-}
-
-// Netty channel for the MC game connection. It's push/async: inbound frames are pumped off the
-// WebSocket and posted onto the event loop, outbound writes are queued to a serialized send pump.
-// The WebSocket itself is wrapped by WebSocketStream (shared with the java.net socket path); this
-// channel only ever touches its async ReadAsync/WriteAsync surface (never the blocking one).
-public sealed class IkvmWebSocketChannel : io.netty.channel.AbstractChannel
-{
-	private static readonly io.netty.channel.ChannelMetadata METADATA = new(false);
-	private const int MaxReaderStackDepth = 8;
-
-	private readonly io.netty.channel.ChannelConfig Config;
-	private readonly java.lang.Runnable ReadTask;
-	private readonly Queue<io.netty.buffer.ByteBuf> InboundBuffer = new();
-
-	internal SocketAddress Remote;
-	internal SocketAddress Local;
-
-	private WebSocketStream Stream;
+	private readonly ClientWebSocket Socket = new();
 	private readonly CancellationTokenSource Life = new();
+	private readonly java.util.function.Consumer OnData;
+	private readonly java.util.function.Consumer OnClosed;
+	private WebSocketStream Stream;
 
 	// ClientWebSocket forbids concurrent SendAsync, so outbound writes funnel through a single pump.
 	private readonly object SendGate = new();
 	private readonly Queue<byte[]> SendQueue = new();
 	private bool Sending;
 
-	private volatile bool Open = true;
-	private volatile bool Active;
-	private bool ReadInProgress;
-	private int ReaderDepth;
-
-	public IkvmWebSocketChannel() : base(null)
+	private IkvmWebSocketConnection(java.util.function.Consumer onData, java.util.function.Consumer onClosed)
 	{
-		Config = new io.netty.channel.DefaultChannelConfig(this);
-		ReadTask = new ActionRunnable(RunReadTask);
+		OnData = onData;
+		OnClosed = onClosed;
 	}
 
-	public override io.netty.channel.ChannelMetadata metadata() => METADATA;
-	public override io.netty.channel.ChannelConfig config() => Config;
-	public override bool isOpen() => Open;
-	public override bool isActive() => Active;
-
-	protected override AbstractUnsafe newUnsafe() => new IkvmWispUnsafe(this);
-
-	// Accept any event loop (Default/Nio/Oio); we drive everything off WebSocket callbacks.
-	protected override bool isCompatible(io.netty.channel.EventLoop loop) => true;
-
-	protected override SocketAddress localAddress0() => Local;
-	protected override SocketAddress remoteAddress0() => Remote;
-
-	protected override void doBind(SocketAddress local) => Local = local;
-
-	protected override void doDisconnect() => doClose();
-
-	protected override void doClose()
+	// Dials remote through the wisp proxy. onOpen gets null once connected, or why it couldn't; after StartReceiving,
+	// onData gets each inbound chunk as a byte[], and onClosed null at EOF or the error that ended the connection.
+	public static IkvmWebSocketConnection Connect(SocketAddress remote, int timeoutMillis, java.util.function.Consumer onOpen, java.util.function.Consumer onData, java.util.function.Consumer onClosed)
 	{
-		Active = false;
-		Open = false;
-		try { Life.Cancel(); } catch { }
-		var stream = Stream;
-		Stream = null;
-		stream?.Abort(); // non-blocking; Close() would do a graceful handshake and stall the loop
-		while (InboundBuffer.Count > 0)
-		{
-			try { InboundBuffer.Dequeue().release(); } catch { }
-		}
-	}
+		var (host, port) = IkvmNetworkState.ResolveTarget(remote);
+		var uri = new Uri($"ws://wisp-tcp/{host}:{port}");
 
-	protected override void doBeginRead()
-	{
-		if (ReadInProgress || !Active)
-			return;
-		if (InboundBuffer.Count == 0)
-		{
-			ReadInProgress = true;
-			return;
-		}
-		DeliverInbound();
-	}
+		var connection = new IkvmWebSocketConnection(onData, onClosed);
+		var cts = new CancellationTokenSource();
+		if (timeoutMillis > 0)
+			cts.CancelAfter(timeoutMillis);
 
-	protected override void doWrite(io.netty.channel.ChannelOutboundBuffer outboundBuffer)
-	{
-		var stream = Stream;
-		for (;;)
+		connection.Socket.ConnectAsync(uri, cts.Token).ContinueWith(t =>
 		{
-			var msg = outboundBuffer.current();
-			if (msg == null)
-				break;
-
-			if (msg is io.netty.buffer.ByteBuf buf)
+			cts.Dispose();
+			if (t.IsFaulted || t.IsCanceled)
 			{
-				int len = buf.readableBytes();
-				if (len > 0 && stream != null)
-				{
-					var bytes = new byte[len];
-					buf.getBytes(buf.readerIndex(), bytes);
-					// Handed to the async send pump; the write promise completes optimistically.
-					// (No netty-level write backpressure — fine for MC's modest packet volume.)
-					Send(bytes);
-				}
-				outboundBuffer.remove();
+				connection.Abort();
+				var reason = t.IsCanceled ? "timed out" : t.Exception?.GetBaseException().Message;
+				onOpen.accept($"wisp websocket connect to {uri} failed: {reason}");
+				return;
 			}
-			else
-			{
-				// MC only writes ByteBufs at this stage; reject anything unexpected.
-				outboundBuffer.remove(new java.lang.UnsupportedOperationException("unsupported message type"));
-			}
-		}
+
+			connection.Stream = new WebSocketStream(connection.Socket);
+			onOpen.accept(null);
+		}, TaskScheduler.Default);
+
+		return connection;
 	}
 
-	// --- callbacks invoked by the Unsafe / I/O pumps (all run on the event loop) ---
-
-	internal void BeginConnected(ClientWebSocket ws)
-	{
-		Active = true;
-		Stream = new WebSocketStream(ws);
-	}
-
-	internal void StartReceiving() => _ = ReceiveLoopAsync();
+	public void StartReceiving() => _ = ReceiveLoopAsync();
 
 	private async Task ReceiveLoopAsync()
 	{
-		var stream = Stream;
-		if (stream == null)
-			return;
-
 		var buf = new byte[16384];
 		try
 		{
 			while (!Life.IsCancellationRequested)
 			{
-				int n = await stream.ReadAsync(buf, 0, buf.Length, Life.Token).ConfigureAwait(false);
+				int n = await Stream.ReadAsync(buf, 0, buf.Length, Life.Token).ConfigureAwait(false);
 				if (n <= 0)
 				{
-					RunOnLoop(OnInboundEof);
+					OnClosed.accept(null);
 					return;
 				}
 
-				var chunk = new byte[n];
-				Array.Copy(buf, 0, chunk, 0, n);
-				RunOnLoop(() => OnInboundBytes(chunk));
+				OnData.accept(buf.AsSpan(0, n).ToArray());
 			}
 		}
 		catch (OperationCanceledException) { /* closing */ }
-		catch (Exception e) { RunOnLoop(() => OnInboundError(e)); }
+		catch (Exception e) { OnClosed.accept(e.Message); }
 	}
 
-	private void Send(byte[] bytes)
+	public void Send(byte[] bytes)
 	{
 		lock (SendGate)
 		{
@@ -802,13 +828,7 @@ public sealed class IkvmWebSocketChannel : io.netty.channel.AbstractChannel
 					next = SendQueue.Dequeue();
 				}
 
-				var stream = Stream;
-				if (stream == null)
-				{
-					lock (SendGate) { Sending = false; }
-					return;
-				}
-				await stream.WriteAsync(next, 0, next.Length, Life.Token).ConfigureAwait(false);
+				await Stream.WriteAsync(next, 0, next.Length, Life.Token).ConfigureAwait(false);
 			}
 		}
 		catch (OperationCanceledException)
@@ -818,161 +838,16 @@ public sealed class IkvmWebSocketChannel : io.netty.channel.AbstractChannel
 		catch (Exception e)
 		{
 			lock (SendGate) { Sending = false; }
-			RunOnLoop(() => OnInboundError(e));
+			OnClosed.accept(e.Message);
 		}
 	}
 
-	internal void RunOnLoop(Action action)
+	// Tears the socket down immediately with no close handshake, so it never blocks the event loop. Also ends a
+	// connect still in flight, whose onOpen then reports the failure.
+	public void Abort()
 	{
-		var loop = eventLoop();
-		if (loop.inEventLoop())
-			action();
-		else
-			loop.execute(new ActionRunnable(action));
-	}
-
-	private void OnInboundBytes(byte[] chunk)
-	{
-		if (!Active)
-			return;
-		var buf = Config.getAllocator().buffer(chunk.Length);
-		buf.writeBytes(chunk);
-
-		InboundBuffer.Enqueue(buf);
-		if (ReadInProgress)
-		{
-			ReadInProgress = false;
-			DeliverInbound();
-		}
-	}
-
-	private void OnInboundEof()
-	{
-		if (!Open)
-			return;
-		var u = @unsafe();
-		u.close(u.voidPromise());
-	}
-
-	private void OnInboundError(Exception e)
-	{
-		if (!Open)
-			return;
-		// Surface the failure to the pipeline, then close (fires channelInactive -> MC disconnect).
-		pipeline().fireExceptionCaught(new java.io.IOException(e.Message));
-		var u = @unsafe();
-		u.close(u.voidPromise());
-	}
-
-	private void RunReadTask()
-	{
-		if (!Active || InboundBuffer.Count == 0)
-			return;
-		ReadFromBuffer();
-	}
-
-	// Bounce off the stack via the event loop if fireChannelRead re-enters us too deeply.
-	private void DeliverInbound()
-	{
-		if (ReaderDepth >= MaxReaderStackDepth)
-		{
-			eventLoop().execute(ReadTask);
-			return;
-		}
-		ReaderDepth++;
-		try { ReadFromBuffer(); }
-		finally { ReaderDepth--; }
-	}
-
-	private void ReadFromBuffer()
-	{
-		var handle = @unsafe().recvBufAllocHandle();
-		handle.reset(Config);
-		var pipe = pipeline();
-		do
-		{
-			if (InboundBuffer.Count == 0)
-				break;
-			var received = InboundBuffer.Dequeue();
-			int n = received.readableBytes();
-			handle.attemptedBytesRead(n);
-			handle.lastBytesRead(n);
-			handle.incMessagesRead(1);
-			pipe.fireChannelRead(received);
-		}
-		while (handle.continueReading());
-		handle.readComplete();
-		pipe.fireChannelReadComplete();
-	}
-}
-
-internal sealed class IkvmWispUnsafe : io.netty.channel.AbstractChannel.AbstractUnsafe
-{
-	private readonly IkvmWebSocketChannel Chan;
-
-	internal IkvmWispUnsafe(IkvmWebSocketChannel chan) : base(chan) => Chan = chan;
-
-	public override void connect(SocketAddress remoteAddress, SocketAddress localAddress, io.netty.channel.ChannelPromise promise)
-	{
-		if (!promise.setUncancellable() || !ensureOpen(promise))
-			return;
-
-		try
-		{
-			if (localAddress != null)
-				Chan.Local = localAddress;
-			Chan.Remote = remoteAddress;
-
-			var (host, port) = IkvmNetworkState.ResolveTarget(remoteAddress);
-			var uri = new Uri($"ws://wisp-tcp/{host}:{port}");
-
-			var ws = new ClientWebSocket();
-			int timeout = Chan.config().getConnectTimeoutMillis();
-			var cts = new CancellationTokenSource();
-			if (timeout > 0)
-				cts.CancelAfter(timeout);
-
-			ws.ConnectAsync(uri, cts.Token).ContinueWith(t =>
-			{
-				cts.Dispose();
-				Chan.RunOnLoop(() => FinishConnect(ws, uri, t, promise));
-			}, TaskScheduler.Default);
-		}
-		catch (Exception e)
-		{
-			promise.tryFailure(annotateConnectException(new ConnectException(e.Message), remoteAddress));
-			closeIfClosed();
-		}
-	}
-
-	private void FinishConnect(ClientWebSocket ws, Uri uri, Task connectTask, io.netty.channel.ChannelPromise promise)
-	{
-		if (!Chan.isOpen())
-		{
-			// Channel was closed while the handshake was in flight.
-			try { ws.Abort(); ws.Dispose(); } catch { }
-			promise.tryFailure(new java.nio.channels.ClosedChannelException());
-			return;
-		}
-
-		if (connectTask.IsFaulted || connectTask.IsCanceled)
-		{
-			try { ws.Abort(); ws.Dispose(); } catch { }
-			var reason = connectTask.IsCanceled ? "timed out" : connectTask.Exception?.GetBaseException().Message;
-			var cause = new ConnectException($"wisp websocket connect to {uri} failed: {reason}");
-			promise.tryFailure(annotateConnectException(cause, Chan.Remote));
-			close(voidPromise());
-			return;
-		}
-
-		bool wasActive = Chan.isActive();
-		Chan.BeginConnected(ws);
-		bool active = Chan.isActive();
-		bool promiseSet = promise.trySuccess();
-		if (!wasActive && active)
-			Chan.pipeline().fireChannelActive();
-		Chan.StartReceiving(); // begin pumping inbound frames only after channelActive
-		if (!promiseSet)
-			close(voidPromise());
+		try { Life.Cancel(); } catch { }
+		try { Socket.Abort(); } catch { }
+		try { Socket.Dispose(); } catch { }
 	}
 }

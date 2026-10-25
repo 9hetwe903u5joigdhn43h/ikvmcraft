@@ -418,7 +418,8 @@ let authStore: Stateful<{
 	{
 		token: undefined,
 	},
-	{ ident: "ikvmcraft-auth-1", autosave: "auto", backing: "localstorage" }
+	// Live/SISU tokens belong to a different client ID than the old Entra flow.
+	{ ident: "ikvmcraft-auth-sisu-1", autosave: "auto", backing: "localstorage" }
 );
 
 type AuthState =
@@ -484,6 +485,7 @@ function Launcher(
 				authStore.token = token = await refreshToken(token.refresh);
 			} catch (e) {
 				this.authState = { type: "error", error: e };
+				return;
 			}
 		}
 

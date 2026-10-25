@@ -1,6 +1,12 @@
 import { ComponentInstance, css, FC, Stateful } from "dreamland/core";
 import "./style.css";
-import { initDotnet, play, dotnetState, MinecraftAuthInfo } from "./dotnet";
+import {
+	initDotnet,
+	play,
+	dotnetState,
+	MinecraftAuthInfo,
+	WebGpuUnavailableError,
+} from "./dotnet";
 import { loglisteners } from "./dotnet/log";
 import { dumpWasmJit } from "./dotnet/jitbench";
 import {
@@ -155,7 +161,10 @@ function Runner(
 			await play(`${version}-fabric-${fabric}`, this.auth);
 		} catch (error) {
 			console.error("Minecraft launch failed", error);
-			this.loadState = "Launch failed";
+			this.loadState =
+				error instanceof WebGpuUnavailableError
+					? "WebGPU unavailable"
+					: "Launch failed";
 			this.loadError = error instanceof Error ? error.message : String(error);
 			this.downloadProgress = null;
 		} finally {
@@ -397,6 +406,10 @@ Runner.style = css`
 		font-size: 0.875rem;
 		overflow-wrap: anywhere;
 	}
+	.load-error [role="alert"] {
+		white-space: pre-line;
+		text-align: left;
+	}
 	.inactive {
 		display: none;
 	}
@@ -434,6 +447,38 @@ type AuthState =
 	  }
 	| { type: "error"; error: any };
 
+const OFFLINE_USERNAME_STORAGE_KEY = "ikvmcraft-offline-username";
+const DEFAULT_OFFLINE_USERNAME = "Player";
+
+// The client accepts any profile name, but keep offline names within the
+// same length/alphabet Minecraft itself allows so mods and servers that
+// validate the profile can't trip over it.
+function normalizeOfflineUsername(name: string): string {
+	const cleaned = name
+		.trim()
+		.replace(/[^A-Za-z0-9_]/g, "")
+		.slice(0, 16);
+	return cleaned.length > 0 ? cleaned : DEFAULT_OFFLINE_USERNAME;
+}
+
+function loadOfflineUsername(): string {
+	try {
+		return normalizeOfflineUsername(
+			localStorage.getItem(OFFLINE_USERNAME_STORAGE_KEY) ?? ""
+		);
+	} catch {
+		return DEFAULT_OFFLINE_USERNAME;
+	}
+}
+
+function saveOfflineUsername(name: string): void {
+	try {
+		localStorage.setItem(OFFLINE_USERNAME_STORAGE_KEY, name);
+	} catch {
+		// Storage can be unavailable (private mode); offline play still works.
+	}
+}
+
 function Launcher(
 	this: FC<
 		{
@@ -444,6 +489,7 @@ function Launcher(
 		{
 			fsOpen: boolean;
 			authState: AuthState;
+			offlineName: string;
 		}
 	>
 ) {
@@ -452,10 +498,7 @@ function Launcher(
 
 	this.fsOpen = false;
 	this.authState = { type: "loading" } as AuthState;
-
-	let readyToPlay = use(this.authState).map(
-		(x) => import.meta.env.DEV || x.type === "done"
-	);
+	this.offlineName = loadOfflineUsername();
 
 	let populateToken = async (token: Token) => {
 		try {
@@ -514,6 +557,10 @@ function Launcher(
 	};
 
 	let authInfo = (): MinecraftAuthInfo => {
+		const offlineName = normalizeOfflineUsername(this.offlineName);
+		this.offlineName = offlineName;
+		saveOfflineUsername(offlineName);
+
 		if (this.authState.type === "done") {
 			return {
 				playerName: this.authState.name,
@@ -522,15 +569,16 @@ function Launcher(
 				userType: "msa",
 			};
 		}
-		if (import.meta.env.DEV) {
-			return {
-				playerName: "ikvmcraft",
-				uuid: "",
-				accessToken: "0",
-				userType: "legacy",
-			};
-		}
-		throw new Error("no auth");
+
+		// Offline profile: the C# launcher derives the offline UUID from the
+		// name, and userType "legacy" makes Minecraft skip account/session
+		// validation entirely.
+		return {
+			playerName: offlineName,
+			uuid: "",
+			accessToken: "0",
+			userType: "legacy",
+		};
 	};
 
 	return (
@@ -545,10 +593,11 @@ function Launcher(
 				allowing for full mods support but resulting in some performance loss.
 			</p>
 			<p>
-				You will need to own Minecraft on a Microsoft account and sign in to use
-				this port. It will download Minecraft automatically into the browser
-				filesystem before launching. The port supports all versions of Minecraft
-				from 1.13 to 26.2, with more coming soon.
+				You can play offline without a Microsoft account. Signing in is
+				optional: it loads your Minecraft profile and enables online services.
+				The port downloads Minecraft automatically into the browser filesystem
+				before launching. It supports all versions of Minecraft from 1.13 to
+				26.2, with more coming soon.
 			</p>
 			<p>
 				The source is available on{" "}
@@ -558,12 +607,16 @@ function Launcher(
 				. NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH
 				MOJANG OR MICROSOFT.
 			</p>
-			<h2>Authentication</h2>
+			<h2>Microsoft account (optional)</h2>
 			<div class="auth">
-				<Button type="normal" icon="left" on:click={deauth}>
-					<Icon icon={iconLogout} />
-					Log Out
-				</Button>
+				{use(this.authState).map((x) =>
+					x.type === "ready" || x.type === "loading" ? null : (
+						<Button type="normal" icon="left" on:click={deauth}>
+							<Icon icon={iconLogout} />
+							Log Out
+						</Button>
+					)
+				)}
 				<div>
 					{use(this.authState).map((x) => {
 						if (x.type === "loading") return <span>Loading auth state...</span>;
@@ -588,7 +641,13 @@ function Launcher(
 									<img class="qr" src={x.qr} />
 								</div>
 							);
-						else if (x.type === "error") return <span>Error: {x.error}</span>;
+						else if (x.type === "error")
+							return (
+								<span>
+									Microsoft sign-in failed ({String(x.error)}). You can still
+									play offline.
+								</span>
+							);
 					})}
 				</div>
 			</div>
@@ -602,12 +661,23 @@ function Launcher(
 					<span>Fabric Loader version: </span>
 					<TextField value={use(this.fabric)} placeholder={fab} />
 				</div>
+				<div>
+					<span>Offline username: </span>
+					<TextField
+						value={use(this.offlineName)}
+						placeholder={DEFAULT_OFFLINE_USERNAME}
+					/>
+				</div>
+				<p class="hint">
+					Used when you are not signed in. No Microsoft account is required to
+					play; online servers that require account authentication are not
+					available offline.
+				</p>
 				<div class="options">
 					<Button
 						type="primary"
 						icon="left"
 						class="play"
-						disabled={readyToPlay.not()}
 						on:click={() => this.play(authInfo())}
 					>
 						<Icon icon={iconPlayArrow} />
@@ -639,6 +709,12 @@ Launcher.style = css`
 		display: flex;
 		flex-direction: column;
 		gap: 0.5rem;
+	}
+
+	.settings .hint {
+		margin: 0;
+		font-size: 0.875rem;
+		color: var(--fg4);
 	}
 
 	.options {

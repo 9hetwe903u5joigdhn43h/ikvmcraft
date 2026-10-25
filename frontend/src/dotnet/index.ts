@@ -2,6 +2,9 @@ import { createState } from "dreamland/core";
 import type { ModuleAPI, MonoConfig, RuntimeAPI } from "../dotnetdefs";
 import { EpxTcpWs } from "../net";
 import { opfsInvalidate } from "../opfs";
+import { probeWebGpu } from "./webgpu";
+
+export { WebGpuUnavailableError } from "./webgpu";
 
 const wasm: ModuleAPI = await eval(`import("/_framework/dotnet.js")`);
 const dotnet = wasm.dotnet;
@@ -126,6 +129,12 @@ function applyRuntimeOptionOverrides(options: string[]) {
 export async function initDotnet(canvas: HTMLCanvasElement) {
 	// emscripten proxy hackfix number 39847232303
 	(globalThis as any).Atomics.waitAsync = undefined;
+
+	// Check this before downloading or booting anything. If the browser cannot
+	// provide a WebGPU adapter, Minecraft only finds out at window creation and
+	// dies with "No supported graphics backend was found", long after the
+	// launcher could have explained what setting to change.
+	const webgpu = await probeWebGpu();
 
 	// bench.jar is on the IKVM classpath at PreInit below, so it has to be in OPFS before that.
 	await provisionOpfsFile("bench.jar", "/bench.jar");
@@ -278,6 +287,10 @@ export async function initDotnet(canvas: HTMLCanvasElement) {
 	let Module = runtime.Module as any;
 
 	Module.canvas = canvas;
+	// wink requests its own adapter; hand it the options that succeeded during
+	// the probe so browsers that refuse the first (high-performance) request
+	// still start, and so writes land on the same Module the driver reads.
+	Module.winkAdapterOptions = webgpu.options;
 	Module.glfwOnWindowCreated = (window: any) => {
 		const initialFrame = Module._emscripten_glfw3_get_frame_count();
 		const timer = setInterval(() => {

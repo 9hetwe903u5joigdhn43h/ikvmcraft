@@ -79,4 +79,8 @@ export default defineConfig({
 		host: true,
 		allowedHosts: ["nyatop.internal.hgci.org", "100.64.0.10"]
 	},
+	preview: {
+		port: 5021,
+		strictPort: true,
+	}
 });

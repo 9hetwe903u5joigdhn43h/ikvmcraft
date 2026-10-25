@@ -1,5 +1,6 @@
 import { console_debug } from "./dotnet/log";
 import { opfsInvalidate } from "./opfs";
+import { client } from "./net";
 
 const DEFAULT_PRISM_META_BASE_URL = "https://meta.prismlauncher.org/v1/";
 const DEFAULT_MOJANG_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -11,6 +12,8 @@ const DEFAULT_MAX_CONCURRENT_LIBRARY_DOWNLOADS = 8;
 const DEFAULT_MAX_CONCURRENT_ASSET_CHECKS = 64;
 const DEFAULT_SHA1_WORKER_COUNT = 8;
 const DEFAULT_MINECRAFT_OS_NAME = "linux";
+const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
+const MAX_DOWNLOAD_ATTEMPTS = 4;
 
 const VERSION_MANIFEST_FILENAME = "version.json";
 const CLIENT_JAR_FILENAME = "client.jar";
@@ -132,6 +135,14 @@ interface IntegrityExpectation {
 	size?: number;
 }
 
+export interface MinecraftDownloadProgress {
+	phase: "metadata" | "libraries" | "client" | "mappings" | "assets" | "fabric" | "complete";
+	completedFiles: number;
+	totalFiles: number;
+	downloadedBytes: number;
+	totalBytes: number | null;
+}
+
 export interface DownloadMinecraftVersionToOpfsOptions {
 	prismMetaBaseUrl?: string;
 	mojangVersionManifestUrl?: string;
@@ -141,6 +152,7 @@ export interface DownloadMinecraftVersionToOpfsOptions {
 	maxConcurrentAssetDownloads?: number;
 	maxConcurrentLibraryDownloads?: number;
 	minecraftOsName?: string;
+	onProgress?: (progress: MinecraftDownloadProgress) => void;
 }
 
 export interface DownloadMinecraftVersionToOpfsResult {
@@ -236,49 +248,178 @@ function splitPath(path: string): string[] {
 	return parts;
 }
 
-function ensureResponseOk(response: Response, url: string): void {
-	if (!response.ok) {
-		throw new Error(`Request failed for '${url}': HTTP ${response.status} ${response.statusText}`);
+class DownloadHttpError extends Error {
+	constructor(url: string, readonly status: number, statusText: string) {
+		super(`Request failed for '${url}': HTTP ${status} ${statusText}`);
+	}
+
+	get retryable(): boolean {
+		return this.status === 408 || this.status === 429 || this.status >= 500;
 	}
 }
 
-function toProxyPath(url: URL): string {
-	if (url.origin === location.origin) {
-		return `${url.pathname}${url.search}${url.hash}`;
+async function downloadFetch(url: string, signal: AbortSignal, useWisp: boolean): Promise<Response> {
+	const target = new URL(url, location.href);
+	const init: RequestInit = { signal, cache: "no-store", redirect: "follow" };
+	if (target.origin === location.origin) return await fetch(target, init);
+	const prefix = DEV_PROXY_PREFIX_BY_HOST[target.hostname];
+	if (import.meta.env.DEV && !useWisp && prefix !== undefined) {
+		return await fetch(`${prefix}${target.pathname}${target.search}`, init);
 	}
-
-	const prefix = DEV_PROXY_PREFIX_BY_HOST[url.hostname];
-	if (prefix === undefined) {
-		throw new Error(`No Vite dev proxy route configured for host '${url.hostname}'.`);
-	}
-
-	return `${prefix}${url.pathname}${url.search}${url.hash}`;
+	return await client.fetch(target, init);
 }
 
-async function proxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-	const baseRequest = input instanceof Request ? input : new Request(input, init);
-	const request = init === undefined ? baseRequest : new Request(baseRequest, init);
-	const requestUrl = new URL(request.url, location.href);
-	const proxiedRequest = new Request(toProxyPath(requestUrl), request);
-	return fetch(proxiedRequest);
+// Keep the deadline active until the body has finished, resetting it for every
+// chunk. Racing it also bounds transports that don't settle promptly on abort.
+async function fetchArrayBufferAttempt(
+	url: string,
+	useWisp: boolean,
+	onBytes?: (bytes: number) => void,
+): Promise<ArrayBuffer> {
+	const controller = new AbortController();
+	let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+	let timer: ReturnType<typeof setTimeout>;
+	let rejectTimeout: (error: Error) => void;
+	const timeout = new Promise<never>((_, reject) => { rejectTimeout = reject; });
+	const resetTimeout = () => {
+		clearTimeout(timer);
+		timer = setTimeout(() => {
+			const error = new Error(`Download timed out after 30 seconds without data: '${url}'.`);
+			controller.abort(error);
+			void reader?.cancel(error).catch(() => {});
+			rejectTimeout(error);
+		}, DOWNLOAD_IDLE_TIMEOUT_MS);
+	};
+	resetTimeout();
+	const operation = (async () => {
+		const response = await downloadFetch(url, controller.signal, useWisp);
+		if (controller.signal.aborted || !response.ok) {
+			void response.body?.cancel().catch(() => {});
+			controller.signal.throwIfAborted();
+			throw new DownloadHttpError(url, response.status, response.statusText);
+		}
+		resetTimeout();
+		const chunks: Uint8Array[] = [];
+		let length = 0;
+		reader = response.body?.getReader();
+		try {
+			while (reader !== undefined) {
+				const { done, value } = await reader.read();
+				controller.signal.throwIfAborted();
+				if (done) break;
+				chunks.push(value);
+				length += value.byteLength;
+				resetTimeout();
+				onBytes?.(length);
+			}
+		} finally {
+			reader?.releaseLock();
+			reader = undefined;
+		}
+		// Content-Length describes compressed bytes when Content-Encoding is set.
+		const encoding = response.headers.get("content-encoding");
+		const contentLength = response.headers.get("content-length");
+		if (contentLength !== null && (!encoding || encoding === "identity") && Number(contentLength) !== length) {
+			throw new Error(`Incomplete download for '${url}': expected ${contentLength} bytes, got ${length}.`);
+		}
+		const data = new Uint8Array(length);
+		let offset = 0;
+		for (const chunk of chunks) {
+			data.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+		return data.buffer;
+	})();
+	try {
+		return await Promise.race([operation, timeout]);
+	} catch (error) {
+		controller.abort(error);
+		void reader?.cancel(error).catch(() => {});
+		throw error;
+	} finally {
+		clearTimeout(timer!);
+	}
+}
+
+async function fetchWithRetry<T>(
+	url: string,
+	decode: (data: ArrayBuffer) => T | Promise<T>,
+	onBytes?: (bytes: number) => void,
+): Promise<T> {
+	for (let attempt = 1; ; attempt += 1) {
+		onBytes?.(0);
+		try {
+			// Dev prefers its HTTP proxy; subsequent attempts fall back to Wisp.
+			const data = await fetchArrayBufferAttempt(url, attempt > 1, onBytes);
+			return await decode(data);
+		} catch (error) {
+			onBytes?.(0);
+			if (attempt >= MAX_DOWNLOAD_ATTEMPTS || (error instanceof DownloadHttpError && !error.retryable)) {
+				throw new Error(`Failed to download '${url}' after ${attempt} attempt(s): ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+			}
+			console.warn(`[minecraft] Retrying '${url}' (${attempt + 1}/${MAX_DOWNLOAD_ATTEMPTS}).`, error);
+			await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+		}
+	}
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
-	const response = await proxyFetch(url);
-	ensureResponseOk(response, url);
-	return await response.json() as T;
+	return await fetchWithRetry(url, (data) => JSON.parse(new TextDecoder().decode(data)) as T);
 }
 
 async function fetchText(url: string): Promise<string> {
-	const response = await proxyFetch(url);
-	ensureResponseOk(response, url);
-	return await response.text();
+	return await fetchWithRetry(url, (data) => {
+		const text = new TextDecoder().decode(data);
+		JSON.parse(text); // All text fetches here are manifests; retry truncated JSON.
+		return text;
+	});
 }
 
-async function fetchArrayBuffer(url: string): Promise<ArrayBuffer> {
-	const response = await proxyFetch(url);
-	ensureResponseOk(response, url);
-	return await response.arrayBuffer();
+class DownloadProgressReporter {
+	private readonly bytes: number[];
+	private downloadedBytes = 0;
+	private completedFiles = 0;
+	private lastReport = 0;
+	private readonly totalBytes: number | null;
+
+	constructor(
+		private readonly phase: MinecraftDownloadProgress["phase"],
+		private readonly files: readonly IntegrityExpectation[],
+		private readonly onProgress?: DownloadMinecraftVersionToOpfsOptions["onProgress"],
+	) {
+		this.bytes = files.map(() => 0);
+		this.totalBytes = files.every((file) => file.size !== undefined)
+			? files.reduce((sum, file) => sum + file.size!, 0) : null;
+		this.report(true);
+	}
+
+	update(index: number, bytes: number): void {
+		this.setBytes(index, Math.min(bytes, this.files[index].size ?? bytes));
+		this.report();
+	}
+
+	complete(index: number, bytes: number): void {
+		this.setBytes(index, bytes);
+		this.completedFiles += 1;
+		this.report(true);
+	}
+
+	private setBytes(index: number, bytes: number): void {
+		this.downloadedBytes += bytes - this.bytes[index];
+		this.bytes[index] = bytes;
+	}
+
+	private report(force = false): void {
+		if (!this.onProgress || (!force && Date.now() - this.lastReport < 100)) return;
+		this.lastReport = Date.now();
+		this.onProgress({
+			phase: this.phase,
+			completedFiles: this.completedFiles,
+			totalFiles: this.files.length,
+			downloadedBytes: this.downloadedBytes,
+			totalBytes: this.totalBytes,
+		});
+	}
 }
 
 type Sha1WorkerRequest = {
@@ -481,23 +622,36 @@ async function assertIntegrity(
 	}
 }
 
-// A jar is a zip, so it must start with the zip magic ("PK\x03\x04", or
-// "PK\x05\x06" for an empty archive). Many Fabric libraries (e.g. the
-// intermediary stub) ship no sha1/size in Prism meta, so assertIntegrity is a
-// no-op for them — this catches HTML error pages / truncated downloads that
-// would otherwise be cached silently and only blow up as a ZipException at
-// launch.
+// Some Fabric libraries have no hash or size in their metadata. Check both
+// the ZIP header and end record so a truncated jar cannot pass on magic alone.
 function assertLooksLikeArchive(data: ArrayBuffer, context: string): void {
 	const header = new Uint8Array(data, 0, Math.min(4, data.byteLength));
-	if (header.length < 4 || header[0] !== 0x50 || header[1] !== 0x4b) {
+	if (header.length < 4 || header[0] !== 0x50 || header[1] !== 0x4b
+		|| !((header[2] === 3 && header[3] === 4) || (header[2] === 5 && header[3] === 6))) {
 		throw new Error(`${context} is not a valid zip/jar (bad magic bytes; likely an error page or truncated download).`);
 	}
+	const view = new DataView(data);
+	for (let offset = data.byteLength - 22; offset >= Math.max(0, data.byteLength - 22 - 65535); offset -= 1) {
+		if (view.getUint32(offset, true) !== 0x06054b50 || offset + 22 + view.getUint16(offset + 20, true) !== data.byteLength) continue;
+		const directorySize = view.getUint32(offset + 12, true);
+		const directoryOffset = view.getUint32(offset + 16, true);
+		if (directorySize === 0xffffffff || directoryOffset === 0xffffffff || directoryOffset + directorySize <= offset) return;
+	}
+	throw new Error(`${context} is not a complete zip/jar (missing or invalid end record).`);
 }
 
-async function downloadBinary(url: string, expectation: IntegrityExpectation, context: string): Promise<ArrayBuffer> {
-	const data = await fetchArrayBuffer(url);
-	await assertIntegrity(data, expectation, context);
-	return data;
+async function downloadBinary(
+	url: string,
+	expectation: IntegrityExpectation,
+	context: string,
+	onBytes?: (bytes: number) => void,
+	validate?: (data: ArrayBuffer) => void,
+): Promise<ArrayBuffer> {
+	return await fetchWithRetry(url, async (data) => {
+		await assertIntegrity(data, expectation, context);
+		validate?.(data);
+		return data;
+	}, onBytes);
 }
 
 async function getOrCreateDirectory(
@@ -616,6 +770,11 @@ async function verifyOpfsFile(
 			throw new Error(`Size mismatch for ${context}: expected ${expectedSize}, got ${size}.`);
 		}
 	}
+	if (verification === "size" && expectedSize === undefined && path.endsWith(".jar")) {
+		const data = await (await fileHandle.getFile()).arrayBuffer();
+		await assertIntegrity(data, expectation, context);
+		assertLooksLikeArchive(data, context);
+	}
 }
 
 async function writeFileToOpfs(
@@ -635,9 +794,47 @@ async function writeFileToOpfs(
 	const writable = await fileHandle.createWritable();
 	try {
 		await writable.write(content);
-	} finally {
 		await writable.close();
+	} catch (error) {
+		await writable.abort().catch(() => {});
+		throw error;
 	}
+}
+
+// A failed launch can be retried without fetching every previously completed
+// file again. Only reuse files that pass integrity checks, including ZIP checks
+// for libraries whose manifests don't provide a hash.
+async function ensureDownloadedFile(
+	root: FileSystemDirectoryHandle,
+	path: string,
+	url: string,
+	expectation: IntegrityExpectation,
+	context: string,
+	onBytes?: (bytes: number) => void,
+): Promise<number> {
+	const validate = (data: ArrayBuffer) => {
+		if (path.endsWith(".jar")) assertLooksLikeArchive(data, context);
+		if (path.endsWith(".json")) JSON.parse(new TextDecoder().decode(data));
+	};
+	const cached = await getFileHandleIfExists(root, path);
+	if (cached !== null) {
+		const file = await cached.getFile();
+		try {
+			if (expectation.size !== undefined && file.size !== expectation.size) {
+				throw new Error(`Size mismatch for cached ${context}.`);
+			}
+			const data = await file.arrayBuffer();
+			await assertIntegrity(data, expectation, context);
+			validate(data);
+			onBytes?.(data.byteLength);
+			return data.byteLength;
+		} catch (error) {
+			console.debug(`[minecraft] Replacing invalid cached ${context}.`, error);
+		}
+	}
+	const data = await downloadBinary(url, expectation, context, onBytes, validate);
+	await writeFileToOpfs(root, path, data);
+	return data.byteLength;
 }
 
 function warnDownloadCheckFailure(context: string, error?: unknown): void {
@@ -789,33 +986,46 @@ async function runConcurrently<T>(
 	}
 
 	let cursor = 0;
+	let stopped = false;
 	const workerCount = Math.min(concurrency, items.length);
 	const runners = Array.from({ length: workerCount }, async () => {
-		while (true) {
+		while (!stopped) {
 			const index = cursor;
 			cursor += 1;
 			if (index >= items.length) {
 				return;
 			}
 
-			await worker(items[index], index);
+			try {
+				await worker(items[index], index);
+			} catch (error) {
+				stopped = true;
+				throw error;
+			}
 		}
 	});
 
-	await Promise.all(runners);
+	// Drain active workers before returning an error so retries don't overlap
+	// writes from the failed run or terminate hash workers still in use.
+	const results = await Promise.allSettled(runners);
+	const failure = results.find((result) => result.status === "rejected");
+	if (failure?.status === "rejected") throw failure.reason;
 }
 
 export async function downloadMinecraftVersionToOpfs(
 	version: string,
 	options: DownloadMinecraftVersionToOpfsOptions = {},
 ): Promise<DownloadMinecraftVersionToOpfsResult> {
-	return await withSha1WorkerPool(() => downloadMinecraftVersionToOpfsImpl(version, options));
+	const result = await withSha1WorkerPool(() => downloadMinecraftVersionToOpfsImpl(version, options));
+	new DownloadProgressReporter("complete", [], options.onProgress);
+	return result;
 }
 
 async function downloadMinecraftVersionToOpfsImpl(
 	version: string,
 	options: DownloadMinecraftVersionToOpfsOptions,
 ): Promise<DownloadMinecraftVersionToOpfsResult> {
+	new DownloadProgressReporter("metadata", [], options.onProgress);
 	const prismMetaBaseUrl = ensureTrailingSlash(options.prismMetaBaseUrl ?? DEFAULT_PRISM_META_BASE_URL);
 	const mojangVersionManifestUrl = options.mojangVersionManifestUrl ?? DEFAULT_MOJANG_VERSION_MANIFEST_URL;
 	const resourceBaseUrl = ensureTrailingSlash(options.resourceBaseUrl ?? DEFAULT_RESOURCE_BASE_URL);
@@ -876,53 +1086,69 @@ async function downloadMinecraftVersionToOpfsImpl(
 	await writeFileToOpfs(root, versionJsonPath, versionManifestText);
 
 	const libraries = collectLibraryDownloads(versionManifest.libraries, libraryBaseUrl, minecraftOsName);
-	await runConcurrently(libraries, maxConcurrentLibraryDownloads, async (library) => {
-		const libraryData = await downloadBinary(
+	const libraryProgress = new DownloadProgressReporter("libraries", libraries, options.onProgress);
+	await runConcurrently(libraries, maxConcurrentLibraryDownloads, async (library, index) => {
+		const libraryPath = `${opfsRootDirectory}/libraries/${library.relativePath}`;
+		const size = await ensureDownloadedFile(
+			root,
+			libraryPath,
 			library.url,
 			{ sha1: library.sha1, size: library.size },
 			`library '${library.name}'`,
+			(bytes) => libraryProgress.update(index, bytes),
 		);
-		const libraryPath = `${opfsRootDirectory}/libraries/${library.relativePath}`;
-		await writeFileToOpfs(root, libraryPath, libraryData);
+		libraryProgress.complete(index, size);
 	});
 
-	const clientJarData = await downloadBinary(clientDownload.url, clientDownload, `client jar '${resolvedVersion}'`);
 	const clientJarPath = `${versionDirectory}/${CLIENT_JAR_FILENAME}`;
-	await writeFileToOpfs(root, clientJarPath, clientJarData);
+	const clientProgress = new DownloadProgressReporter("client", [clientDownload], options.onProgress);
+	const clientSize = await ensureDownloadedFile(root, clientJarPath, clientDownload.url, clientDownload,
+		`client jar '${resolvedVersion}'`, (bytes) => clientProgress.update(0, bytes));
+	clientProgress.complete(0, clientSize);
 
 	const clientMappingsDownload = await resolveMojangClientMappingsDownload(resolvedVersion, mojangVersionManifestUrl);
 	let clientMappingsPath: string | null = null;
 	if (clientMappingsDownload !== null) {
-		const mappingsData = await downloadBinary(
+		const mappingsProgress = new DownloadProgressReporter("mappings", [clientMappingsDownload], options.onProgress);
+		clientMappingsPath = `${versionDirectory}/${CLIENT_MAPPINGS_FILENAME}`;
+		const size = await ensureDownloadedFile(
+			root,
+			clientMappingsPath,
 			clientMappingsDownload.url,
 			clientMappingsDownload,
 			`client mappings '${resolvedVersion}'`,
+			(bytes) => mappingsProgress.update(0, bytes),
 		);
-		clientMappingsPath = `${versionDirectory}/${CLIENT_MAPPINGS_FILENAME}`;
-		await writeFileToOpfs(root, clientMappingsPath, mappingsData);
+		mappingsProgress.complete(0, size);
 	}
 
-	const assetIndexData = await downloadBinary(
+	new DownloadProgressReporter("metadata", [], options.onProgress);
+	const assetIndexPath = `${opfsRootDirectory}/assets/indexes/${assetIndexId}.json`;
+	await ensureDownloadedFile(
+		root,
+		assetIndexPath,
 		assetIndexDownload.url,
 		assetIndexDownload,
 		`asset index '${assetIndexId}'`,
 	);
-	const assetIndexText = new TextDecoder().decode(assetIndexData);
+	const assetIndexText = await readFileText(root, assetIndexPath);
 	const parsedAssetIndex = JSON.parse(assetIndexText) as AssetIndex;
-	const assetIndexPath = `${opfsRootDirectory}/assets/indexes/${assetIndexId}.json`;
-	await writeFileToOpfs(root, assetIndexPath, assetIndexText);
 
 	const assetObjects = collectAssetObjects(parsedAssetIndex);
-	await runConcurrently(assetObjects, maxConcurrentAssetDownloads, async (assetObject) => {
+	const assetProgress = new DownloadProgressReporter("assets", assetObjects, options.onProgress);
+	await runConcurrently(assetObjects, maxConcurrentAssetDownloads, async (assetObject, index) => {
 		const prefix = assetObject.hash.slice(0, 2);
 		const objectUrl = new URL(`${prefix}/${assetObject.hash}`, resourceBaseUrl).toString();
 		const objectPath = `${opfsRootDirectory}/assets/objects/${prefix}/${assetObject.hash}`;
-		const objectData = await downloadBinary(
+		const size = await ensureDownloadedFile(
+			root,
+			objectPath,
 			objectUrl,
 			{ sha1: assetObject.hash, size: assetObject.size },
 			`asset object '${assetObject.hash}'`,
+			(bytes) => assetProgress.update(index, bytes),
 		);
-		await writeFileToOpfs(root, objectPath, objectData);
+		assetProgress.complete(index, size);
 	});
 
 	return {
@@ -1178,13 +1404,16 @@ export async function downloadFabricMinecraftVersionToOpfs(
 	mcVersion: string,
 	options: DownloadFabricMinecraftVersionToOpfsOptions = {},
 ): Promise<DownloadFabricMinecraftVersionToOpfsResult> {
-	return await withSha1WorkerPool(() => downloadFabricMinecraftVersionToOpfsImpl(mcVersion, options));
+	const result = await withSha1WorkerPool(() => downloadFabricMinecraftVersionToOpfsImpl(mcVersion, options));
+	new DownloadProgressReporter("complete", [], options.onProgress);
+	return result;
 }
 
 async function downloadFabricMinecraftVersionToOpfsImpl(
 	mcVersion: string,
 	options: DownloadFabricMinecraftVersionToOpfsOptions,
 ): Promise<DownloadFabricMinecraftVersionToOpfsResult> {
+	new DownloadProgressReporter("metadata", [], options.onProgress);
 	const prismMetaBaseUrl = ensureTrailingSlash(options.prismMetaBaseUrl ?? DEFAULT_PRISM_META_BASE_URL);
 	const libraryBaseUrl = ensureTrailingSlash(options.libraryBaseUrl ?? DEFAULT_LIBRARY_BASE_URL);
 	const opfsRootDirectory = ensureSafePathSegment(
@@ -1207,7 +1436,7 @@ async function downloadFabricMinecraftVersionToOpfsImpl(
 			verification: "size",
 		}));
 	const vanillaResult = shouldDownloadVanilla
-		? await downloadMinecraftVersionToOpfs(requestedMcVersion, options)
+		? await downloadMinecraftVersionToOpfsImpl(requestedMcVersion, options)
 		: null;
 
 	const root = await navigator.storage.getDirectory();
@@ -1228,6 +1457,7 @@ async function downloadFabricMinecraftVersionToOpfsImpl(
 		"fabric intermediary version",
 	);
 
+	new DownloadProgressReporter("metadata", [], options.onProgress);
 	const [loaderManifest, intermediaryManifest] = await Promise.all([
 		fetchPrismPackageManifest<PrismFabricManifest>(prismMetaBaseUrl, FABRIC_LOADER_PACKAGE, loaderVersion),
 		fetchPrismPackageManifest<PrismFabricManifest>(prismMetaBaseUrl, FABRIC_INTERMEDIARY_PACKAGE, intermediaryVersion),
@@ -1242,17 +1472,18 @@ async function downloadFabricMinecraftVersionToOpfsImpl(
 		...(loaderManifest.libraries ?? []),
 	];
 	const fabricLibraries = collectLibraryDownloads(fabricLibraryEntries, libraryBaseUrl, minecraftOsName);
-	await runConcurrently(fabricLibraries, maxConcurrentLibraryDownloads, async (library) => {
-		const libraryData = await downloadBinary(
+	const fabricProgress = new DownloadProgressReporter("fabric", fabricLibraries, options.onProgress);
+	await runConcurrently(fabricLibraries, maxConcurrentLibraryDownloads, async (library, index) => {
+		const libraryPath = `${opfsRootDirectory}/libraries/${library.relativePath}`;
+		const size = await ensureDownloadedFile(
+			root,
+			libraryPath,
 			library.url,
 			{ sha1: library.sha1, size: library.size },
 			`fabric library '${library.name}'`,
+			(bytes) => fabricProgress.update(index, bytes),
 		);
-		if (library.relativePath.endsWith(".jar")) {
-			assertLooksLikeArchive(libraryData, `fabric library '${library.name}'`);
-		}
-		const libraryPath = `${opfsRootDirectory}/libraries/${library.relativePath}`;
-		await writeFileToOpfs(root, libraryPath, libraryData);
+		fabricProgress.complete(index, size);
 	});
 
 	const fabricVersionId = ensureSafePathSegment(

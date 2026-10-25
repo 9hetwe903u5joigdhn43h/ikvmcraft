@@ -19,6 +19,77 @@ interface OAuthResponse {
 	refresh_token: string;
 }
 
+interface AuthErrorResponse {
+	error?: string;
+	error_description?: string;
+	errorMessage?: string;
+	Message?: string;
+	XErr?: number;
+}
+
+function authErrorMessage(json: AuthErrorResponse): string {
+	if (json.XErr) {
+		switch (json.XErr) {
+			case 2148916227:
+				return "xsts says this account is banned from xbox";
+			case 2148916233:
+				return "xsts says this account does not have a xbox account";
+			case 2148916235:
+				return "xsts says xbox live is not available in this account's country";
+			case 2148916236:
+			case 2148916237:
+				return "xsts says this account needs adult verification";
+			case 2148916238:
+				return "xsts says this account is under 18 and needs to be added to a family";
+			default:
+				return `xsts error: ${json.XErr}`;
+		}
+	}
+	return [json.error, json.error_description, json.errorMessage, json.Message]
+		.filter((message) => typeof message === "string" && message.length > 0)
+		.join(": ");
+}
+
+async function authRequest<T>(
+	context: string,
+	url: string,
+	options?: RequestInit,
+	allowedErrors: readonly string[] = []
+): Promise<T> {
+	let res: Response;
+	try {
+		res = await client.fetch(url, options);
+	} catch (error) {
+		throw new Error(
+			`${context} failed: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error }
+		);
+	}
+
+	const status = `HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`;
+	let json: unknown;
+	try {
+		json = await res.json();
+	} catch (error) {
+		throw new Error(`${context} failed (${status}): invalid JSON response.`, {
+			cause: error,
+		});
+	}
+	if (!json || typeof json !== "object" || Array.isArray(json)) {
+		throw new Error(`${context} failed (${status}): invalid response.`);
+	}
+
+	const data = json as AuthErrorResponse;
+	// Device-code polling uses HTTP 400 while waiting for the user to sign in.
+	const allowedError = (res.ok || res.status === 400)
+		&& typeof data.error === "string" && allowedErrors.includes(data.error);
+	if ((!res.ok || data.error || data.XErr) && !allowedError) {
+		const message = authErrorMessage(data);
+		throw new Error(`${context} failed (${status})${message ? `: ${message}` : "."}`);
+	}
+	return json as T;
+}
+
 export interface Token {
 	access: string;
 	expires: number;
@@ -32,6 +103,13 @@ interface DeviceCodeResult {
 }
 
 function convertOAuthResponse(res: OAuthResponse): Token {
+	if (
+		typeof res.access_token !== "string" || !res.access_token
+		|| typeof res.refresh_token !== "string" || !res.refresh_token
+		|| !Number.isFinite(res.expires_in) || res.expires_in <= 0
+	) {
+		throw new Error("Microsoft authentication returned incomplete token information.");
+	}
 	return {
 		access: res.access_token,
 		refresh: res.refresh_token,
@@ -40,8 +118,8 @@ function convertOAuthResponse(res: OAuthResponse): Token {
 }
 
 export async function deviceCodeAuth(): Promise<DeviceCodeResult> {
-	// TOOD: Type
-	const deviceCodeRes = await client.fetch(
+	const deviceCodeData = await authRequest<DeviceCodeResponse>(
+		"Microsoft device code request",
 		"https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
 		{
 			method: "POST",
@@ -55,10 +133,9 @@ export async function deviceCodeAuth(): Promise<DeviceCodeResult> {
 		}
 	);
 
-	const deviceCodeData: DeviceCodeResponse = await deviceCodeRes.json();
 	const { device_code, user_code, verification_uri, interval } = deviceCodeData;
 
-	if (!device_code || !user_code || !verification_uri) {
+	if (!device_code || !user_code || !verification_uri || !Number.isFinite(interval) || interval <= 0) {
 		throw new Error("Failed to obtain device code information.");
 	}
 	const tokenGenerator = async () => {
@@ -71,7 +148,8 @@ export async function deviceCodeAuth(): Promise<DeviceCodeResult> {
 		}
 
 		while (!tokenData?.access_token) {
-			const tokenRes = await client.fetch(
+			const pollingResponse = await authRequest<TokenPollingResponse>(
+				"Microsoft token polling",
 				"https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
 				{
 					method: "POST",
@@ -83,10 +161,9 @@ export async function deviceCodeAuth(): Promise<DeviceCodeResult> {
 						grant_type: "urn:ietf:params:oauth:grant-type:device_code",
 						device_code: device_code,
 					}).toString(),
-				}
+				},
+				["authorization_pending"]
 			);
-
-			const pollingResponse: TokenPollingResponse = await tokenRes.json();
 
 			if (pollingResponse.access_token) {
 				tokenData = pollingResponse as OAuthResponse;
@@ -94,7 +171,7 @@ export async function deviceCodeAuth(): Promise<DeviceCodeResult> {
 				// user has not completed the authentication yet; wait for the interval
 				await new Promise((resolve) => setTimeout(resolve, interval * 1000));
 			} else {
-				throw new Error(`Polling failed with error: ${pollingResponse.error}`);
+				throw new Error("Microsoft token polling did not return a token.");
 			}
 		}
 
@@ -104,7 +181,8 @@ export async function deviceCodeAuth(): Promise<DeviceCodeResult> {
 }
 
 export async function refreshToken(refresh: string): Promise<Token> {
-	const res = await client.fetch(
+	const json = await authRequest<OAuthResponse>(
+		"Microsoft token refresh",
 		"https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
 		{
 			method: "POST",
@@ -116,7 +194,6 @@ export async function refreshToken(refresh: string): Promise<Token> {
 			}),
 		}
 	);
-	const json = (await res.json()) as OAuthResponse;
 	return convertOAuthResponse(json);
 }
 
@@ -142,7 +219,8 @@ export async function startDeviceCodeAuth(): Promise<AuthCodeResult> {
 }
 
 async function xboxAuth(msToken: string): Promise<string> {
-	const res = await client.fetch(
+	const json = await authRequest<{ Token?: string }>(
+		"Xbox Live authentication",
 		"https://user.auth.xboxlive.com/user/authenticate",
 		{
 			headers: {
@@ -161,7 +239,6 @@ async function xboxAuth(msToken: string): Promise<string> {
  		}`,
 		}
 	);
-	const json = await res.json();
 	if (!json["Token"]) throw new Error("xbox live did not return a token");
 
 	return json["Token"];
@@ -170,7 +247,11 @@ async function xboxAuth(msToken: string): Promise<string> {
 async function xstsAuth(
 	xboxToken: string
 ): Promise<{ token: string; userHash: string }> {
-	const res = await client.fetch(
+	const json = await authRequest<{
+		Token?: string;
+		DisplayClaims?: { xui?: { uhs?: string }[] };
+	}>(
+		"XSTS authorization",
 		"https://xsts.auth.xboxlive.com/xsts/authorize",
 		{
 			headers: {
@@ -188,46 +269,18 @@ async function xstsAuth(
 			}),
 		}
 	);
-	const json = await res.json();
-
-	const xboxError = json["XErr"];
-	if (xboxError) {
-		switch (xboxError) {
-			case 2148916227:
-				throw new Error("xsts says this account is banned from xbox");
-			case 2148916233:
-				throw new Error("xsts says this account does not have a xbox account");
-			case 2148916235:
-				throw new Error(
-					"xsts says xbox live is not available in this account's country"
-				);
-			case 2148916236:
-			case 2148916237:
-				throw new Error("xsts says this account needs adult verification");
-			case 2148916238:
-				throw new Error(
-					"xsts says this account is under 18 and needs to be added to a family"
-				);
-			case 2148916262:
-			default:
-				throw new Error(`xsts error: ${xboxError}`);
-		}
-	}
 
 	const token = json["Token"];
 	if (!token) throw new Error("xsts did not return a token");
-	let userHash: string;
-	try {
-		userHash = json["DisplayClaims"]["xui"][0]["uhs"];
-	} catch (err) {
-		throw new Error("xsts did not return user hash");
-	}
+	const userHash = json.DisplayClaims?.xui?.[0]?.uhs;
+	if (!userHash) throw new Error("xsts did not return user hash");
 
 	return { token, userHash };
 }
 
 async function mcAuth(xstsToken: string, xstsHash: string): Promise<string> {
-	const res = await client.fetch(
+	const json = await authRequest<{ access_token?: string }>(
+		"Minecraft authentication",
 		"https://api.minecraftservices.com/authentication/login_with_xbox",
 		{
 			headers: {
@@ -240,9 +293,8 @@ async function mcAuth(xstsToken: string, xstsHash: string): Promise<string> {
 			}),
 		}
 	);
-	const json = await res.json();
 	const token = json["access_token"];
-	if (!token) throw new Error(`minecraft did not return a token: ${res.status} ${JSON.stringify(json)}`);
+	if (!token) throw new Error("minecraft did not return a token");
 
 	if (!(await checkOwnership(token))) throw new Error("account does not own minecraft");
 
@@ -250,7 +302,8 @@ async function mcAuth(xstsToken: string, xstsHash: string): Promise<string> {
 }
 
 export async function checkOwnership(mcToken: string): Promise<boolean> {
-	const res = await client.fetch(
+	const json = await authRequest<{ items?: { name: string }[] }>(
+		"Minecraft ownership check",
 		"https://api.minecraftservices.com/entitlements/mcstore",
 		{
 			headers: {
@@ -258,12 +311,11 @@ export async function checkOwnership(mcToken: string): Promise<boolean> {
 			},
 		}
 	);
-	const json = await res.json();
-	return (
-		json.items?.some(
-			(item: { name: string }) =>
-				item.name === "product_minecraft" || item.name === "game_minecraft"
-		) ?? false
+	if (!Array.isArray(json.items)) {
+		throw new Error("Minecraft ownership check did not return entitlements.");
+	}
+	return json.items.some(
+		(item) => item.name === "product_minecraft" || item.name === "game_minecraft"
 	);
 }
 
@@ -287,7 +339,8 @@ export interface CapeInfo extends AccessoryInfo {
 }
 
 export async function getProfile(mcToken: string): Promise<UserInfo> {
-	const res = await client.fetch(
+	const json = await authRequest<UserInfo>(
+		"Minecraft profile request",
 		"https://api.minecraftservices.com/minecraft/profile",
 		{
 			headers: {
@@ -295,7 +348,6 @@ export async function getProfile(mcToken: string): Promise<UserInfo> {
 			},
 		}
 	);
-	const json = await res.json();
 	if (!json["id"] || !json["name"])
 		throw new Error("mc did not return a profile");
 

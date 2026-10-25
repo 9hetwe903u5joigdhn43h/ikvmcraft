@@ -46,6 +46,9 @@ serve: build
 publish: build
 	cd frontend && pnpm build
 
+serve-publish: publish
+	cd frontend && pnpm preview
+
 dotnetclean:
 	rm -rvf statics/dotnet loader/{bin,obj} loader/Generated.targets loader/ikvmc-manifest.g.json || true
 ikvmclean:

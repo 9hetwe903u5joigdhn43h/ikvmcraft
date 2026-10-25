@@ -6,6 +6,7 @@ import { dumpWasmJit } from "./dotnet/jitbench";
 import {
 	downloadFabricMinecraftVersionToOpfs,
 	isMinecraftVersionDownloaded,
+	type MinecraftDownloadProgress,
 } from "./minecraft";
 import { OpfsExplorer } from "./fs";
 import { Button, Icon } from "./ui/Button";
@@ -23,6 +24,7 @@ import iconCode from "@ktibow/iconset-material-symbols/code";
 import iconFolderOpen from "@ktibow/iconset-material-symbols/folder-open";
 import iconPlayArrow from "@ktibow/iconset-material-symbols/play-arrow";
 import iconLogin from "@ktibow/iconset-material-symbols/login";
+import iconLogout from "@ktibow/iconset-material-symbols/logout";
 
 function LogView(this: FC<{ scrolling: boolean }>) {
 	const create = (color: string, log: string) => {
@@ -90,47 +92,96 @@ function Runner(
 		{
 			version: string;
 			fabric: string;
-			auth: MinecraftAuthInfo,
+			auth: MinecraftAuthInfo;
 		},
 		{
 			canvas: HTMLCanvasElement;
 			fsOpen: boolean;
 			loadState: string;
+			downloadProgress: MinecraftDownloadProgress | null;
+			loadError: string;
 		}
 	>
 ) {
 	this.fsOpen = false;
 	this.loadState = "Initializing runtime";
+	this.downloadProgress = null;
+	this.loadError = "";
 
 	let version = this.version;
 	let fabric = this.fabric;
-	this.cx.mount = async () => {
-		await initDotnet(this.canvas);
-		this.loadState = "Verifying assets";
+	let runtimeReady = false;
+	let starting = false;
+	const phaseLabels: Record<MinecraftDownloadProgress["phase"], string> = {
+		metadata: "Fetching metadata",
+		libraries: "Downloading libraries",
+		client: "Downloading client",
+		mappings: "Downloading mappings",
+		assets: "Downloading assets",
+		fabric: "Downloading Fabric",
+		complete: "Preparing game",
+	};
+	const start = async () => {
+		if (starting) return;
+		starting = true;
+		this.loadError = "";
+		this.downloadProgress = null;
+		try {
+			if (!runtimeReady) {
+				this.loadState = "Initializing runtime";
+				await initDotnet(this.canvas);
+				runtimeReady = true;
+			}
+			this.loadState = "Verifying assets";
 
-		if (new URLSearchParams(location.search).has("bench"))
-			console.debug("?bench: skipping the Minecraft download check");
-		else {
-			let verify = await isMinecraftVersionDownloaded(
-				`${version}-fabric-${fabric}`,
-				{
+			if (new URLSearchParams(location.search).has("bench"))
+				console.debug("?bench: skipping the Minecraft download check");
+			else if (
+				!(await isMinecraftVersionDownloaded(`${version}-fabric-${fabric}`, {
 					verification: "size",
-				}
-			);
-			console.log(verify);
-			if (!verify) {
-				this.loadState = "Downloading assets";
+				}))
+			) {
 				await downloadFabricMinecraftVersionToOpfs(version, {
 					loaderVersion: fabric,
+					onProgress: (progress) => {
+						this.downloadProgress = progress;
+						this.loadState = phaseLabels[progress.phase];
+					},
 				});
-			} else {
-				console.debug(`downlaodead ${version} fabric ${fabric} already`);
 			}
+
+			this.downloadProgress = null;
+			this.loadState = "";
+			await play(`${version}-fabric-${fabric}`, this.auth);
+		} catch (error) {
+			console.error("Minecraft launch failed", error);
+			this.loadState = "Launch failed";
+			this.loadError = error instanceof Error ? error.message : String(error);
+			this.downloadProgress = null;
+		} finally {
+			starting = false;
 		}
+	};
+	this.cx.mount = start;
 
-		this.loadState = "";
-
-		await play(`${version}-fabric-${fabric}`, this.auth);
+	const progressFraction = (
+		progress: MinecraftDownloadProgress | null
+	): number | undefined => {
+		if (!progress || progress.totalFiles === 0) return undefined;
+		if (progress.completedFiles === progress.totalFiles) return 1;
+		return progress.totalBytes !== null && progress.totalBytes > 0
+			? Math.min(0.99, progress.downloadedBytes / progress.totalBytes)
+			: progress.completedFiles / progress.totalFiles;
+	};
+	const progressText = (progress: MinecraftDownloadProgress | null): string => {
+		if (!progress || progress.totalFiles === 0) return "";
+		const files = `${progress.completedFiles.toLocaleString()} / ${progress.totalFiles.toLocaleString()} files`;
+		const percent = Math.floor((progressFraction(progress) ?? 0) * 100);
+		const bytes =
+			progress.totalBytes !== null && progress.totalBytes > 0
+				? ` · ${(progress.downloadedBytes / 1048576).toFixed(1)} / ${(progress.totalBytes / 1048576).toFixed(1)} MiB`
+				: "";
+		return `${percent}% · ${files}${bytes}`;
 	};
 
 	let toFixed = (x: number) => x.toFixed(0);
@@ -187,7 +238,40 @@ function Runner(
 					class="overlay not-ready"
 					class:hidden={use(this.loadState).map((x) => x === "")}
 				>
-					{use(this.loadState)}
+					<div class="load-status" role="status">
+						{use(this.loadState)}
+					</div>
+					<div
+						class="download-progress"
+						class:inactive={use(this.downloadProgress).map(
+							(progress) => progress === null
+						)}
+					>
+						{use(this.downloadProgress).map((progress) => {
+							const value = progressFraction(progress);
+							return value === undefined ? (
+								<progress aria-label="Download progress" max={1} />
+							) : (
+								<progress
+									aria-label="Download progress"
+									max={1}
+									value={value}
+								/>
+							);
+						})}
+						<div class="progress-detail">
+							{use(this.downloadProgress).map(progressText)}
+						</div>
+					</div>
+					<div
+						class="load-error"
+						class:inactive={use(this.loadError).map((error) => error === "")}
+					>
+						<div role="alert">{use(this.loadError)}</div>
+						<Button type="primary" on:click={start}>
+							Retry
+						</Button>
+					</div>
 				</div>
 				<canvas
 					id="canvas"
@@ -282,6 +366,39 @@ Runner.style = css`
 	}
 	.canvas .not-ready {
 		z-index: 1;
+		flex-direction: column;
+		gap: 1rem;
+		padding: 1.5rem;
+		text-align: center;
+		font-size: clamp(1.25rem, 3vw, 2rem);
+	}
+	.download-progress {
+		width: min(100%, 28rem);
+	}
+	.download-progress progress {
+		display: block;
+		width: 100%;
+		height: 1rem;
+	}
+	.progress-detail {
+		margin-top: 0.5rem;
+		font-size: 0.875rem;
+		color: var(--fg4);
+		font-variant-numeric: tabular-nums;
+	}
+	.load-error {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 1rem;
+		max-width: 100%;
+		max-height: 70%;
+		overflow: auto;
+		font-size: 0.875rem;
+		overflow-wrap: anywhere;
+	}
+	.inactive {
+		display: none;
 	}
 	.canvas .waiting {
 		z-index: -1;
@@ -335,7 +452,9 @@ function Launcher(
 	this.fsOpen = false;
 	this.authState = { type: "loading" } as AuthState;
 
-	let readyToPlay = use(this.authState).map(x => import.meta.env.DEV || x.type === "done");
+	let readyToPlay = use(this.authState).map(
+		(x) => import.meta.env.DEV || x.type === "done"
+	);
 
 	let populateToken = async (token: Token) => {
 		try {
@@ -387,42 +506,89 @@ function Launcher(
 			this.authState = { type: "error", error: err };
 		}
 	};
+	let deauth = async () => {
+		authStore.token = undefined;
+		this.authState = { type: "ready" };
+	};
 
 	let authInfo = (): MinecraftAuthInfo => {
 		if (this.authState.type === "done") {
-			return { playerName: this.authState.name, uuid: this.authState.uuid, accessToken: this.authState.token, userType: "msa" }
+			return {
+				playerName: this.authState.name,
+				uuid: this.authState.uuid,
+				accessToken: this.authState.token,
+				userType: "msa",
+			};
 		}
 		if (import.meta.env.DEV) {
-			return { playerName: "ikvmcraft", uuid: "", accessToken: "0", userType: "legacy" };
+			return {
+				playerName: "ikvmcraft",
+				uuid: "",
+				accessToken: "0",
+				userType: "legacy",
+			};
 		}
 		throw new Error("no auth");
-	}
+	};
 
 	return (
 		<div>
 			<Logo />
-			<p>This is a web port.</p>
+			<p>
+				This is a port of modern Minecraft, including drop-in mods, to the
+				browser using a custom threaded .NET 10 build for WebAssembly with a
+				just-in-time compiler and a custom fork of IKVM, a JVM and
+				Bytecode-to-IL translator for .NET. It may not run well on low-end
+				devices due to Minecraft being translated to WASM fully at runtime,
+				allowing for full mods support but resulting in some performance loss.
+			</p>
+			<p>
+				You will need to own Minecraft on a Microsoft account and sign in to use
+				this port. It will download Minecraft automatically into the browser
+				filesystem before launching. The port supports all versions of Minecraft
+				from 1.13 to 26.2, with more coming soon.
+			</p>
+			<p>
+				The source is available on{" "}
+				<a href="https://github.com/r58playz/ikvmcraft" target="_blank">
+					GitHub
+				</a>
+				. NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH
+				MOJANG OR MICROSOFT.
+			</p>
 			<h2>Authentication</h2>
 			<div class="auth">
-				{use(this.authState).map((x) => {
-					if (x.type === "loading") return <span>Loading auth state...</span>;
-					else if (x.type === "ready")
-						return (
-							<Button type="primary" icon="left" on:click={auth}>
-								<Icon icon={iconLogin} />
-								Log In
-							</Button>
-						);
-					else if (x.type === "done") return <span>Logged in as {x.name}</span>;
-					else if (x.type === "authing")
-						return (
-							<div>
-								<div>Log in at <a href={x.url} target="_blank">{x.url}</a></div>
-								<img class="qr" src={x.qr} />
-							</div>
-						);
-					else if (x.type === "error") return <span>Error: {x.error}</span>;
-				})}
+				<Button type="normal" icon="left" on:click={deauth}>
+					<Icon icon={iconLogout} />
+					Log Out
+				</Button>
+				<div>
+					{use(this.authState).map((x) => {
+						if (x.type === "loading") return <span>Loading auth state...</span>;
+						else if (x.type === "ready")
+							return (
+								<Button type="primary" icon="left" on:click={auth}>
+									<Icon icon={iconLogin} />
+									Log In
+								</Button>
+							);
+						else if (x.type === "done")
+							return <span>Logged in as {x.name}</span>;
+						else if (x.type === "authing")
+							return (
+								<div>
+									<div>
+										Log in at{" "}
+										<a href={x.url} target="_blank">
+											{x.url}
+										</a>
+									</div>
+									<img class="qr" src={x.qr} />
+								</div>
+							);
+						else if (x.type === "error") return <span>Error: {x.error}</span>;
+					})}
+				</div>
 			</div>
 			<h2>Play</h2>
 			<div class="settings">
@@ -461,7 +627,6 @@ function Launcher(
 }
 Launcher.style = css`
 	:scope {
-		height: 100%;
 		margin: auto;
 
 		max-width: 50rem;
@@ -481,6 +646,13 @@ Launcher.style = css`
 	}
 	.options :global(.play) {
 		flex: 1;
+	}
+
+	.auth {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		align-items: start;
 	}
 
 	.auth .qr {
@@ -538,6 +710,7 @@ App.style = css`
 	:scope > * {
 		position: absolute;
 		inset: 0;
+		overflow-y: scroll;
 	}
 
 	.hidden {
